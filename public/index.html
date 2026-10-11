@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#7367f0">
+  <meta name="description" content="JTG Cloud — a private home for your files, on your own server.">
+  <title>JTG Cloud</title>
+  <link id="favicon" rel="icon" href="/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div id="app"><div class="boot"><img src="/mark.svg" alt="" width="48" height="48"><span>Opening your cloud…</span></div></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <div id="modal-root"></div>
+  <div id="drop-overlay" class="drop-overlay" hidden><div>Drop files into your cloud<span>They’ll be saved in the current folder.</span></div></div>
+  <input type="file" id="file-picker" multiple hidden>
+  <input type="file" id="folder-picker" webkitdirectory multiple hidden>
+</body>
+</html>
