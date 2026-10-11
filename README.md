@@ -53,23 +53,28 @@ npm test
 
 The integration tests use temporary storage and verify authentication, CSRF, account isolation, encryption/downloads, quotas, concurrent uploads, folder cycles, trash/restore, role boundaries, suspension, password recovery, restarts and rate limits.
 
-## Publish the source to your Git repository
+## Repository
 
-This project was created inside `jtg-cloud/` to preserve the existing workspace app. Upload **the contents of this folder at the root of the new JTG Cloud repository**. Include the lockfile, scripts, `src/`, `public/`, and `tests/`. Do not upload `.env`, `data/`, `backups/`, or preview credentials. No GitHub URL is hardcoded; the installer asks for your public HTTPS Git URL.
+JTG Cloud is maintained by **JTG Studio** at [JishnuTheGamer/jtg-cloud](https://github.com/JishnuTheGamer/jtg-cloud), on branch **`jtg-studio`**. The repository remains private until its owner chooses to publish it. The installer uses this repository automatically. Keep `.env`, `data/`, `backups/`, and credentials out of Git.
 
 ## Automated VPS installation
 
 Supported: **Debian 12+ / Ubuntu 22.04+**, x86_64 or ARM64, root/sudo access, a domain pointed at the VPS, and free disk space for users’ storage. A small private instance can start with 2 GB RAM; provision disk capacity for actual quotas. The app does not allocate quota-sized disk space in advance.
 
-Clone the project or download and inspect `install.sh`, then run:
+Clone the repository, enter the **`jtg-cloud`** directory (the `.git` suffix belongs to the repository URL), inspect the installer, then run:
 
 ```sh
+git clone https://github.com/JishnuTheGamer/jtg-cloud.git
+cd jtg-cloud
+bash install.sh --dry-run
 sudo bash install.sh
 ```
 
-The menu provides install, update, restart, stop, status, account-password reset and backup. Installation:
+While the repository is private, Git must be authenticated before cloning. If Git is missing, install it with `sudo apt-get update` and `sudo apt-get install -y git`. One authentication option is the [GitHub CLI](https://cli.github.com/manual/gh_auth_setup-git): install `gh`, run `gh auth login`, then `gh auth setup-git` as the account doing the clone. Use the credential helper or a read-only deploy key; do not put a token in the repository URL or script. The installer reuses the committed source from this authenticated local checkout and sets the deployment's origin to the GitHub URL. Untracked files, `.env`, data and local credential configuration are not copied. Managed updates run as root, so configure repository read access for that account as well while the repository is private.
 
-1. Asks for the repository URL and HTTPS domain.
+The **JTG Studio** terminal menu uses bold headings, colors when supported, ten installation stages and a completion status. Set `NO_COLOR=1` for plain output. `--dry-run` previews the flow without changing the system. The menu provides install, update, restart, stop, status, account-password reset, backup and installation preview. Installation:
+
+1. Uses the JTG Cloud repository automatically and asks for the HTTPS domain.
 2. Installs Git, curl, Python and xz tools with apt.
 3. Discovers the latest supported **Node.js LTS** from the official Node.js release index, downloads the correct architecture, verifies its SHA-256 checksum, and installs it under `/opt/jtg-cloud-runtime/`. Existing system Node installations are not overwritten.
 4. Installs PM2, clones the app into `/opt/jtg-cloud`, and configures port **6696**.
@@ -80,12 +85,12 @@ The menu provides install, update, restart, stop, status, account-password reset
 
 The app listens on **127.0.0.1:6696**. The public website uses HTTPS on **443**, with Nginx forwarding to 6696. This keeps the unencrypted app port private. If you choose an existing reverse proxy, configure it before opening the cloud. Production refuses an HTTP `APP_URL` and uses secure cookies.
 
-The installer is intended for a new installation and stops rather than overwriting an existing directory. If installation fails, inspect the error, complete the failed configuration step manually and use the existing source/data. Do not delete `data/` to retry.
+The installer is intended for a new installation and stops rather than overwriting an existing directory. Package and Git diagnostics are saved to root-readable `/var/log/jtg-cloud-install.log`; owner credentials are entered directly in the terminal and never sent to this log. If installation fails, inspect the error, complete the failed configuration step manually and use the existing source/data. Do not delete `data/` to retry.
 
 ## Manual production deployment
 
 ```sh
-git clone YOUR_REPOSITORY_URL jtg-cloud
+git clone https://github.com/JishnuTheGamer/jtg-cloud.git
 cd jtg-cloud
 npm ci --omit=dev --ignore-scripts
 cp .env.example .env
