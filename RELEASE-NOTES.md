@@ -1,4 +1,12 @@
-# JTG Cloud 1.2.0
+# JTG Cloud 1.3.0
+
+The VPS installer now uses **`/root/jtg-cloud`**, standard **`npm install -g pm2`** and root's **`/root/.pm2`**. Setup, storage ownership, process management and reboot startup use the same account, resolving the previous source/runtime permission mismatch. Restart recreates a missing process entry; Stop remains optional.
+
+Menu **9** repairs interrupted installations and migrates the previous `/opt` installation, retaining a consistent database/blob/key/environment backup and the existing owner. Menu **10** uninstalls the cloud after a typed confirmation, deleting its entire managed directory and removing its PM2 process from both the current and previous account. Shared Node.js/PM2 and other apps are preserved. See README for the one-time repair command and retained legacy runtime artifacts.
+
+The updater now uses the same global root PM2 setup. Port 6969, default unlimited file size, configurable 20 MB parts, encrypted downloads and themes remain available.
+
+## JTG Cloud 1.2.0
 
 The service now runs directly on **port 6969**, with localhost and automatically available IPv4 addresses. Installation asks for owner credentials and configures the Node/PM2 service. Website hostname, DNS and certificate setup are removed.
 

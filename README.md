@@ -52,11 +52,43 @@ bash install.sh --dry-run
 sudo bash install.sh
 ```
 
-The installer uses the repository URL automatically, installs the current supported Node.js LTS and PM2, clones into `/opt/jtg-cloud`, installs locked requirements, prepares the dedicated `jtgcloud` account, asks for owner details, prints localhost/IPv4 addresses and starts the service on **6969** with systemd reboot startup. Existing system Node installations are not overwritten. Node downloads are checked against the official SHA-256 checksum.
+The installer clones into **`/root/jtg-cloud`**, installs requirements with `npm ci`, asks for owner details and starts the cloud on **6969**. It keeps an existing working Node.js 24+ installation; otherwise it installs the latest supported LTS with verified SHA-256 downloads and makes `node`/`npm` available globally. PM2 uses the standard **`npm install -g pm2`**, available as `pm2` from `/usr/local/bin`.
 
-The installer asks for owner account information only. It configures the Node service directly; network hosting, DNS and certificates are not installed. Source is root-owned, `.env` is restricted and data/backups are private. Package/Git diagnostics go to `/var/log/jtg-cloud-install.log`; owner passwords are entered privately and never sent to this log.
+Run management commands from the **root account** (`sudo -i`). Source, owner setup, backups, the PM2 process and reboot startup use that same account and **`/root/.pm2`**. This removes the previous mismatch between root-owned source and an inaccessible service-user runtime. `.env` is mode 600; the project and stored data are private to root. Package/Git diagnostics go to `/var/log/jtg-cloud-install.log`; owner passwords are entered privately and never sent to this log.
 
-The bold JTG Studio menu supports install, update, restart, stop, status, password reset, backup and installation preview. Use `NO_COLOR=1` for plain output. A fresh installation refuses to overwrite an existing application directory. If a step fails, inspect the log and repair the failed step without deleting user data.
+The bold JTG Studio menu has **Restart cloud** as its primary service action, plus optional Stop, status, update, password reset, backup, preview, **Repair / migrate (9)** and **Uninstall (10)**. Restart also recreates a missing PM2 entry. Use `NO_COLOR=1` for plain output. A fresh installation refuses to overwrite an existing directory; choose Repair after an interrupted setup.
+
+“Installation complete” appears only after startup and the expected cloud health/version succeed. Interrupted setup stays marked for repair; option 5 shows the current PM2 status.
+
+Normal PM2 commands after installation:
+
+```sh
+sudo -i
+cd /root/jtg-cloud
+pm2 restart jtg-cloud --update-env
+pm2 status
+pm2 logs jtg-cloud --lines 50
+```
+
+Initial startup uses `pm2 start ecosystem.config.cjs --only jtg-cloud`, followed by `pm2 startup systemd -u root --hp /root` and `pm2 save`, as described in the [PM2 documentation](https://pm2.io/docs/runtime/guide/installation/).
+
+## Repair an older or interrupted installation
+
+Download the latest management script outside the installed project, then choose **9**:
+
+```sh
+sudo -i
+curl -fL https://raw.githubusercontent.com/JishnuTheGamer/jtg-cloud/jtg-studio/install.sh -o /root/jtg-cloud-manager.sh
+bash /root/jtg-cloud-manager.sh
+```
+
+Repair installs global PM2, fetches the current source before stopping the cloud, makes a consistent private backup, removes the old cloud process from the previous PM2 account, updates source and moves `/opt/jtg-cloud` to `/root/jtg-cloud`. It fixes ownership, configures direct port 6969, preserves the existing owner/files/key, and restores PM2 startup. A partial installation without an owner asks for owner details once. Tracked edits, divergent commits, two installation directories, missing encryption keys and storage outside the managed directory are refused for manual recovery. Both data and backups must be inside the project; absolute paths inside the old directory migrate along with it.
+
+## Uninstall
+
+Run `sudo bash /root/jtg-cloud/install.sh` and choose **10**. Enter **`UNINSTALL JTG CLOUD`** when prompted. This removes the cloud's PM2 entry, updates saved process lists and **deletes the complete project directory**, including accounts, uploads, encryption key, environment and backups inside it. Copy a backup outside the project first if you want to retain it.
+
+Global Node.js/PM2 and other applications remain installed. The root PM2 startup service is shared and remains available. The old `jtgcloud` startup is disabled/removed when its process list is empty; the old runtime and service home are retained as recovery artifacts. A separately downloaded `jtg-cloud-manager.sh` is outside the project and can be deleted after use. Uninstall refuses symbolic-link installation paths and external data/backup directories.
 
 ## Roles and quotas
 
@@ -87,22 +119,16 @@ Downloads stream to the browser without gathering the entire file in JavaScript 
 For an installation already using this updater:
 
 ```sh
-sudo bash /opt/jtg-cloud/update.sh
+sudo bash /root/jtg-cloud/update.sh
 ```
 
-**One-time upgrade from port 6696:** run the latest updater from the fetched source, so the previous updater does not keep checking the old port:
-
-```sh
-cd /opt/jtg-cloud
-sudo git fetch origin
-sudo git show origin/jtg-studio:update.sh | sudo bash
-```
+**Upgrading an older `/opt` installation or fixing a permission error:** use **Repair / migrate** above once. The old updater still targets the old service account; it cannot perform this migration.
 
 The updater stops PM2, saves a consistent database/blob/key backup and a restricted copy of `.env`, fast-forwards source, migrates the previous network settings once to direct port 6969, installs requirements, runs checks and tests, restarts and checks health. User data, quotas and branding remain. The first v1.2 database startup sets the previous per-file cap to unlimited; subsequent restarts preserve explicitly chosen caps.
 
 Tracked local changes and divergent Git history stop the update. A failure restores tracked source and the previous environment. If old source cannot read the storage format, the service remains stopped for backup recovery. Source rollback does not restore the database; retain the full pre-update backup. Before downgrading to v1.0, restore its matching complete backup because it cannot read segmented files.
 
-Use one PM2 fork process, not cluster mode: per-account upload locking and reservations assume one service instance. Node security updates are separate from application updates; keep the scoped LTS runtime current.
+Use one PM2 fork process: per-account upload locking and reservations assume one service instance. Node security updates are separate from application updates; keep the system LTS runtime current.
 
 ## Backups and account recovery
 
@@ -111,7 +137,7 @@ Use installer menu option 7, or stop the service and run:
 ```sh
 pm2 stop jtg-cloud
 node --env-file-if-exists=.env src/cli.mjs backup
-pm2 start jtg-cloud
+pm2 restart jtg-cloud
 ```
 
 Backups contain SQLite, encrypted blobs (including committed upload parts) and the encryption key. Copy them to a protected off-server location. Restore database, `blobs/` and `encryption.key` together into a fresh data directory with private permissions. Do not copy old WAL/SHM/lock files. Preserve `.env` separately. Losing the key makes stored files unreadable; the app refuses to invent a replacement key for an existing database.

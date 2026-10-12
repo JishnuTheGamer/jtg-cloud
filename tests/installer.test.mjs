@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +18,22 @@ function shell(args, env = {}) {
   return result.stdout;
 }
 
+function fixture(callback) {
+  const temporary=mkdtempSync(path.join(os.tmpdir(),'jtg-cloud-installer-'));
+  try { return callback(temporary,{JTG_TEST_ROOT:temporary.replaceAll('\\','/')}); }
+  finally {assert.equal(path.dirname(temporary),os.tmpdir());rmSync(temporary,{recursive:true,force:true});}
+}
+
+const mockPm2 = `
+  pm2() {
+    printf '%s|%s\\n' "$PM2_HOME" "$*" >> "$JTG_TEST_ROOT/actions"
+    case "$1" in
+      jlist) printf '%s\\n' "$MOCK_PM2_APPS";;
+      delete) [[ "$2" == jtg-cloud ]] || return 99; MOCK_PM2_APPS='[{"name":"other-app","pm2_env":{"pm_exec_path":"/srv/other/server.js","status":"online"}}]';;
+    esac
+  }
+`;
+
 test('installer preview is noninteractive and does not invoke system commands', { skip: !available }, () => {
   // Any attempt to perform installation in preview mode must fail the check.
   const output = shell(['-c', `
@@ -27,8 +43,10 @@ test('installer preview is noninteractive and does not invoke system commands', 
     bash ./install.sh --dry-run
   `]);
   assert.match(output, /JTG Studio/);
-  assert.match(output, /git clone --branch jtg-studio https:\/\/github\.com\/JishnuTheGamer\/jtg-cloud\.git \/opt\/jtg-cloud/);
-  assert.match(output, /cd \/opt\/jtg-cloud\n/);
+  assert.match(output, /git clone --branch jtg-studio https:\/\/github\.com\/JishnuTheGamer\/jtg-cloud\.git \/root\/jtg-cloud/);
+  assert.match(output, /cd \/root\/jtg-cloud\n/);
+  assert.match(output, /npm install -g pm2/);
+  assert.match(output, /pm2 startup systemd -u root --hp \/root/);
   assert.match(output, /\[10\/10\] Verify cloud health/);
   assert.match(output, /http:\/\/localhost:6969/);
   assert.doesNotMatch(output, /Nginx|Certbot|Cloudflare|Configure HTTPS|DNS|6696/);
@@ -46,6 +64,10 @@ test('installer supports bold terminals, plain terminals and menu exit', { skip:
   assert.match(menu, /CLOUD MANAGEMENT/);
   assert.match(menu, /INSTALLATION PLAN/);
   assert.match(menu, /See you next time/);
+  assert.match(menu, /Restart cloud/);
+  assert.doesNotMatch(menu, /Start \/ restart/);
+  assert.match(menu, /Repair \/ migrate installation/);
+  assert.match(menu, /Uninstall JTG Cloud/);
 });
 
 test('private checkout deployment clones committed source without data or Git credentials', { skip: !available }, () => {
@@ -196,3 +218,278 @@ test('updater migrates the previous network setup once and preserves unrelated s
     `],{JTG_TEST_ROOT:temporary.replaceAll('\\','/')});
   } finally {assert.equal(path.dirname(temporary),os.tmpdir());rmSync(temporary,{recursive:true,force:true});}
 });
+
+test('PM2 installation uses npm global and the standard root daemon', {skip:!available}, () => fixture((temporary,env)=>{
+  shell(['-c',`
+    source ./install.sh
+    LOG_FILE="$JTG_TEST_ROOT/install.log"
+    npm() { printf '%s|%s\\n' "$NPM_CONFIG_PREFIX" "$*" > "$JTG_TEST_ROOT/npm-call"; }
+    pm2() { return 0; }
+    install_pm2
+    [[ "$PM2_HOME" == /root/.pm2 ]]
+  `],env);
+  assert.equal(readFileSync(path.join(temporary,'npm-call'),'utf8').trim(),'/usr/local|install -g pm2');
+}));
+
+test('PM2 ownership checks reject name collisions including duplicate names', {skip:!available}, () => fixture((temporary,env)=>{
+  shell(['-c',`
+    source ./install.sh
+    ${mockPm2}
+    MOCK_PM2_APPS='[]'
+    [[ "$(process_state "$PM2_HOME")" == missing ]]
+    MOCK_PM2_APPS='[{"name":"jtg-cloud","pm2_env":{"pm_exec_path":"/root/jtg-cloud/src/server.mjs","status":"stopped"}}]'
+    [[ "$(process_state "$PM2_HOME")" == stopped ]]
+    MOCK_PM2_APPS='[{"name":"jtg-cloud","pm2_env":{"pm_exec_path":"/opt/jtg-cloud/src/server.mjs","status":"online"}}]'
+    [[ "$(process_state /home/jtgcloud/.pm2)" == online ]]
+    MOCK_PM2_APPS='[{"name":"jtg-cloud","pm2_env":{"pm_exec_path":"/srv/other/server.js"}}]'
+    if process_state "$PM2_HOME"; then exit 98; fi
+    MOCK_PM2_APPS='[{"name":"jtg-cloud","pm2_env":{"pm_exec_path":"/root/jtg-cloud/src/server.mjs"}},{"name":"jtg-cloud","pm2_env":{"pm_exec_path":"/srv/other/server.js"}}]'
+    if process_state "$PM2_HOME"; then exit 98; fi
+  `],env);
+  assert.doesNotMatch(readFileSync(path.join(temporary,'actions'),'utf8'),/delete|stop|kill|save/);
+}));
+
+test('managed path guard refuses broad and unexpected removal targets', {skip:!available}, () => fixture((temporary,env)=>{
+  shell(['-c',`
+    source ./install.sh
+    rm() { printf 'UNEXPECTED REMOVE\\n' > "$JTG_TEST_ROOT/unsafe"; return 97; }
+    for candidate in / /root /opt /root/jtg-cloud/.. /root/other "$JTG_TEST_ROOT"; do
+      if (validate_directory "$candidate"); then exit 98; fi
+    done
+    [[ ! -e "$JTG_TEST_ROOT/unsafe" ]]
+  `],env);
+  assert.equal(existsSync(path.join(temporary,'unsafe')),false);
+}));
+
+test('managed storage refuses external, overlapping and redirected directories', {skip:!available}, () => fixture((temporary,env)=>{
+  shell(['-c',`
+    source ./install.sh
+    mkdir -p "$JTG_TEST_ROOT/app" "$JTG_TEST_ROOT/external"
+    cd "$JTG_TEST_ROOT/app"
+    printf 'DATA_DIR=./data\\nBACKUP_DIR=./backups\\n' > .env
+    validate_storage
+    printf 'DATA_DIR=../external\\nBACKUP_DIR=./backups\\n' > .env
+    if validate_storage; then exit 98; fi
+    printf 'DATA_DIR=./data\\nBACKUP_DIR=./data/backups\\n' > .env
+    if validate_storage; then exit 98; fi
+    node --input-type=module -e 'import fs from "node:fs";import path from "node:path";fs.symlinkSync(path.resolve("../external"),"linked-data",process.platform==="win32"?"junction":"dir")'
+    printf 'DATA_DIR=./linked-data\\nBACKUP_DIR=./backups\\n' > .env
+    if validate_storage; then exit 98; fi
+  `],env);
+}));
+
+test('environment migration rewrites managed absolute paths and preserves custom fields', {skip:!available}, () => fixture((temporary,env)=>{
+  shell(['-c',`
+    source ./install.sh
+    APP_DIR="$JTG_TEST_ROOT/app"
+    mkdir -p "$APP_DIR"
+    cd "$APP_DIR"
+    printf 'PORT=6696\\nDATA_DIR="/opt/jtg-cloud/private-data"\\nBACKUP_DIR=/opt/jtg-cloud/private-backups\\nREGISTRATION_DOMAIN=members.example\\nCUSTOM_VALUE=keep-me\\n' > .env
+    MSYS2_ARG_CONV_EXCL=/opt/jtg-cloud configure_environment /opt/jtg-cloud
+    configure_environment
+    grep -qx 'PORT=6969' .env
+    grep -qx 'HOST=0.0.0.0' .env
+    grep -qx 'APP_URL=' .env
+    grep -qx 'COOKIE_SECURE=false' .env
+    grep -qx 'CUSTOM_VALUE=keep-me' .env
+    grep -qx 'REGISTRATION_DOMAIN=members.example' .env
+    [[ "$(grep -c '^PORT=' .env)" == 1 ]]
+  `],env);
+  const text=readFileSync(path.join(temporary,'app','.env'),'utf8');
+  assert.match(text,new RegExp(`DATA_DIR="${temporary.replaceAll('\\','/').replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}/app/private-data"`));
+  assert.doesNotMatch(text,/\/opt\/jtg-cloud/);
+}));
+
+test('offline repair backup and owner check preserve database, blobs, key and environment', {skip:!available}, () => fixture((temporary,env)=>{
+  shell(['-c',`
+    source ./install.sh
+    mkdir -p "$JTG_TEST_ROOT/app/data/blobs"
+    cd "$JTG_TEST_ROOT/app"
+    printf 'DATA_DIR=./data\\nBACKUP_DIR=./backups\\nCUSTOM_VALUE=kept\\n' > .env
+    printf 'encrypted fixture' > data/blobs/encrypted-part
+    printf 'private fixture key' > data/encryption.key
+    node --input-type=module -e 'import {DatabaseSync} from "node:sqlite";const db=new DatabaseSync("data/cloud.sqlite");db.exec("CREATE TABLE users(id TEXT,role TEXT)");db.prepare("INSERT INTO users VALUES (?,?)").run("existing-owner","owner");db.close()'
+    ensure_owner
+    backup_existing
+    node --input-type=module -e 'import fs from "node:fs";import {DatabaseSync} from "node:sqlite";const backup="backups/"+fs.readdirSync("backups")[0];const db=new DatabaseSync(backup+"/cloud.sqlite",{readOnly:true});if(db.prepare("SELECT id FROM users").get().id!=="existing-owner")process.exit(98);db.close();for(const file of ["encryption.key","blobs/encrypted-part"])if(!fs.readFileSync("data/"+file).equals(fs.readFileSync(backup+"/"+file)))process.exit(98);if(!fs.readFileSync(".env").equals(fs.readFileSync(backup+"/.env")))process.exit(98)'
+  `],env);
+}));
+
+test('backup refuses a missing encryption key and owner check refuses a corrupt database', {skip:!available}, () => fixture((temporary,env)=>{
+  shell(['-c',`
+    source ./install.sh
+    mkdir -p "$JTG_TEST_ROOT/app/data/blobs" "$JTG_TEST_ROOT/app/src"
+    cd "$JTG_TEST_ROOT/app"
+    printf 'DATA_DIR=./data\\nBACKUP_DIR=./backups\\n' > .env
+    printf 'not-a-database' > data/cloud.sqlite
+    printf 'process.exit(98)\\n' > src/cli.mjs
+    if backup_existing; then exit 98; fi
+    if ensure_owner; then exit 98; fi
+    [[ ! -e data/encryption.key && ! -e backups ]]
+    [[ "$(cat data/cloud.sqlite)" == not-a-database ]]
+  `],env);
+}));
+
+test('restart recreates a missing PM2 entry using the global root account', {skip:!available}, () => fixture((temporary,env)=>{
+  shell(['-c',`
+    source ./install.sh
+    APP_DIR="$JTG_TEST_ROOT/app"
+    mkdir -p "$APP_DIR/.git"
+    printf 'PORT=6969\\n' > "$APP_DIR/.env"
+    require_root() { return 0; }
+    validate_directory() { [[ "$1" == "$APP_DIR" && -d "$APP_DIR/.git" ]]; }
+    health() { printf 'health\\n' >> "$JTG_TEST_ROOT/actions"; }
+    ${mockPm2}
+    MOCK_PM2_APPS='[]'
+    restart_project
+  `],env);
+  const actions=readFileSync(path.join(temporary,'actions'),'utf8');
+  assert.match(actions,/\/root\/\.pm2\|startOrRestart ecosystem.config.cjs --only jtg-cloud --update-env --interpreter /);
+  assert.match(actions,/health\n\/root\/\.pm2\|save/);
+  assert.doesNotMatch(actions,/runuser|\/home\/jtgcloud|\/opt\/jtg-cloud-runtime/);
+}));
+
+test('uninstall needs typed confirmation, removes the whole fixture and preserves other apps', {skip:!available}, () => fixture((temporary,env)=>{
+  shell(['-c',`
+    source ./install.sh
+    APP_DIR="$JTG_TEST_ROOT/app"; LEGACY_DIR="$JTG_TEST_ROOT/legacy"
+    LOG_FILE="$JTG_TEST_ROOT/install.log"
+    mkdir -p "$APP_DIR/.git" "$APP_DIR/data/blobs" "$APP_DIR/backups"
+    printf 'DATA_DIR=./data\\nBACKUP_DIR=./backups\\n' > "$APP_DIR/.env"
+    printf 'private content' > "$APP_DIR/data/blobs/file"
+    printf 'keep another app' > "$JTG_TEST_ROOT/other-app"
+    require_root() { return 0; }
+    validate_directory() { [[ "$1" == "$APP_DIR" && -d "$APP_DIR/.git" ]]; }
+    legacy_pm2_exists() { return 1; }
+    cd() { if [[ "$1" == /root ]]; then builtin cd "$JTG_TEST_ROOT"; else builtin cd "$@"; fi; }
+    rm() {
+      if [[ "$1" == -rf ]]; then
+        [[ "$#" == 4 && "$2" == --one-file-system && "$3" == -- && "$4" == "$APP_DIR" && "$PWD" != "$APP_DIR" ]] || return 99
+        printf 'remove-project\\n' >> "$JTG_TEST_ROOT/actions"
+        command rm -rf -- "$APP_DIR"
+      else
+        [[ "$#" == 5 && "$1" == -f && "$2" == -- && "$3" == /root/.pm2/logs/jtg-cloud-out.log && "$4" == /root/.pm2/logs/jtg-cloud-error.log && "$5" == "$LOG_FILE" ]] || return 99
+      fi
+    }
+    ${mockPm2}
+    MOCK_PM2_APPS='[{"name":"jtg-cloud","pm2_env":{"pm_exec_path":"/root/jtg-cloud/src/server.mjs","status":"online"}},{"name":"other-app","pm2_env":{"pm_exec_path":"/srv/other/server.js","status":"online"}}]'
+    uninstall_project <<< 'cancel'
+    [[ -d "$APP_DIR" && ! -e "$JTG_TEST_ROOT/actions" ]]
+    uninstall_project <<< 'UNINSTALL JTG CLOUD'
+    [[ ! -e "$APP_DIR" && -f "$JTG_TEST_ROOT/other-app" ]]
+    [[ "$MOCK_PM2_APPS" == '[{"name":"other-app","pm2_env":{"pm_exec_path":"/srv/other/server.js","status":"online"}}]' ]]
+  `],env);
+  const actions=readFileSync(path.join(temporary,'actions'),'utf8');
+  assert.match(actions,/delete jtg-cloud\n\/root\/\.pm2\|save --force\n\/root\/\.pm2\|save --force\nremove-project/);
+  assert.doesNotMatch(actions,/delete other-app|kill|unstartup/);
+}));
+
+test('repair migrates an older fixture after a backup and retains its owner and files', {skip:!available}, () => fixture((temporary,env)=>{
+  shell(['-c',`
+    source ./install.sh
+    APP_DIR="$JTG_TEST_ROOT/app"; LEGACY_DIR="$JTG_TEST_ROOT/legacy"
+    LOG_FILE="$JTG_TEST_ROOT/install.log"
+    mkdir -p "$LEGACY_DIR/data/blobs" "$LEGACY_DIR/src"
+    printf '{"name":"jtg-cloud","version":"1.2.0"}\\n' > "$LEGACY_DIR/package.json"
+    printf '// fixture\\n' > "$LEGACY_DIR/src/server.mjs"
+    printf '.env\\ndata/\\nbackups/\\n' > "$LEGACY_DIR/.gitignore"
+    printf 'DATA_DIR=./data\\nBACKUP_DIR=./backups\\nPORT=6696\\n' > "$LEGACY_DIR/.env"
+    printf 'saved encrypted part' > "$LEGACY_DIR/data/blobs/part"
+    printf 'saved encryption key' > "$LEGACY_DIR/data/encryption.key"
+    git init --quiet --initial-branch=jtg-studio "$LEGACY_DIR"
+    git -C "$LEGACY_DIR" add .
+    git -C "$LEGACY_DIR" -c user.name='Repair Test' -c user.email='test@example.invalid' commit --quiet -m previous
+    git clone --quiet --bare "$LEGACY_DIR" "$JTG_TEST_ROOT/remote.git"
+    git -C "$LEGACY_DIR" remote add origin "$JTG_TEST_ROOT/remote.git"
+    node --input-type=module - "$LEGACY_DIR/data/cloud.sqlite" <<'JS'
+import {DatabaseSync} from 'node:sqlite';
+const db=new DatabaseSync(process.argv[2]);
+db.exec('CREATE TABLE users(id TEXT,role TEXT)');
+db.prepare('INSERT INTO users VALUES (?,?)').run('preserved-owner','owner');db.close();
+JS
+    require_root() { return 0; }
+    linux_requirements() { printf 'requirements\\n' >> "$JTG_TEST_ROOT/actions"; }
+    install_node() { return 0; }
+    install_pm2() { return 0; }
+    # Keep production guards intact; this fixture validator only admits its two temporary paths.
+    validate_directory() { [[ "$1" == "$APP_DIR" || "$1" == "$LEGACY_DIR" ]] && [[ -d "$1/.git" ]]; }
+    legacy_pm2_exists() { return 1; }
+    health() { printf 'health\\n' >> "$JTG_TEST_ROOT/actions"; }
+    show_addresses() { return 0; }
+    chown() { printf 'ownership|%s\\n' "$*" >> "$JTG_TEST_ROOT/actions"; }
+    chmod() { printf 'permissions|%s\\n' "$*" >> "$JTG_TEST_ROOT/actions"; }
+    npm() { printf 'npm|%s\\n' "$*" >> "$JTG_TEST_ROOT/actions"; }
+    node() { if [[ "$1" == scripts/check.mjs ]]; then return 0; else command node "$@"; fi; }
+    realpath() { if [[ "$*" == '-e /root' ]]; then printf '/root\\n'; else command realpath "$@"; fi; }
+    cd() { if [[ "$1" == /root ]]; then builtin cd "$JTG_TEST_ROOT"; else builtin cd "$@"; fi; }
+    ${mockPm2}
+    MOCK_PM2_APPS='[{"name":"jtg-cloud","pm2_env":{"pm_exec_path":"/opt/jtg-cloud/src/server.mjs","status":"errored"}}]'
+    repair_project
+    [[ ! -e "$LEGACY_DIR" && -f "$APP_DIR/data/encryption.key" ]]
+    grep -qx 'PORT=6969' "$APP_DIR/.env"
+    node --env-file=.env --input-type=module -e 'import {DatabaseSync} from "node:sqlite";const db=new DatabaseSync("data/cloud.sqlite",{readOnly:true});if(db.prepare("SELECT id FROM users").get().id!=="preserved-owner")process.exit(98);db.close()'
+  `],env);
+  const installed=path.join(temporary,'app');
+  assert.equal(existsSync(path.join(temporary,'legacy')),false);
+  assert.equal(readFileSync(path.join(installed,'data','blobs','part'),'utf8'),'saved encrypted part');
+  assert.equal(readFileSync(path.join(installed,'data','encryption.key'),'utf8'),'saved encryption key');
+  assert.equal(existsSync(path.join(installed,'.jtg-installed')),true);
+  assert.match(readFileSync(path.join(temporary,'actions'),'utf8'),/ownership\|-R root:root/);
+  const backups=readdirSync(path.join(installed,'backups'));
+  assert.equal(backups.length,1);
+  assert.equal(readFileSync(path.join(installed,'backups',backups[0],'.env'),'utf8'),'DATA_DIR=./data\nBACKUP_DIR=./backups\nPORT=6696\n');
+}));
+
+test('legacy PM2 retirement preserves another app and its startup service', {skip:!available}, () => fixture((temporary,env)=>{
+  shell(['-c',`
+    source ./install.sh
+    legacy_pm2_exists() { return 0; }
+    systemctl() { printf 'UNEXPECTED SYSTEM CHANGE' > "$JTG_TEST_ROOT/unsafe"; return 99; }
+    ${mockPm2}
+    MOCK_PM2_APPS='[{"name":"jtg-cloud","pm2_env":{"pm_exec_path":"/opt/jtg-cloud/src/server.mjs","status":"stopped"}},{"name":"other-app","pm2_env":{"pm_exec_path":"/srv/other/server.js","status":"online"}}]'
+    retire_legacy_pm2
+    [[ ! -e "$JTG_TEST_ROOT/unsafe" && "$PM2_HOME" == /root/.pm2 ]]
+  `],env);
+  const actions=readFileSync(path.join(temporary,'actions'),'utf8');
+  assert.match(actions,/\/home\/jtgcloud\/\.pm2\|delete jtg-cloud/);
+  assert.doesNotMatch(actions,/kill|stop other-app|\/root\/\.pm2\|delete/);
+}));
+
+test('health validation requires the expected cloud response and version', {skip:!available}, () => fixture((temporary,env)=>{
+  shell(['-c',`
+    source ./install.sh
+    mkdir -p "$JTG_TEST_ROOT/app"
+    cd "$JTG_TEST_ROOT/app"
+    printf '{"version":"1.3.0"}\\n' > package.json
+    curl() { printf '%s' "$MOCK_HEALTH"; }
+    sleep() { return 0; }
+    MOCK_HEALTH='{"status":"ok","version":"1.3.0"}'
+    health
+    MOCK_HEALTH='{"status":"ok","version":"1.2.0"}'
+    if health; then exit 98; fi
+    MOCK_HEALTH='unrelated HTTP 200'
+    if health; then exit 98; fi
+    MOCK_HEALTH='{"status":"error","version":"1.3.0"}'
+    if health; then exit 98; fi
+  `],env);
+}));
+
+test('repair fetch failure stops before touching the running service or existing data', {skip:!available}, () => fixture((temporary,env)=>{
+  const result=spawnSync(bash,['-c',`
+    source ./install.sh
+    APP_DIR="$JTG_TEST_ROOT/app"; LEGACY_DIR="$JTG_TEST_ROOT/legacy"; LOG_FILE="$JTG_TEST_ROOT/install.log"
+    mkdir -p "$APP_DIR/.git" "$APP_DIR/data"
+    printf 'DATA_DIR=./data\\nBACKUP_DIR=./backups\\n' > "$APP_DIR/.env"
+    printf 'preserve-me' > "$APP_DIR/data/existing"
+    require_root() { return 0; }
+    linux_requirements() { return 0; }; install_node() { return 0; }; install_pm2() { return 0; }
+    validate_directory() { [[ "$1" == "$APP_DIR" ]]; }
+    git() { if [[ "$3" == status ]]; then return 0; else return 128; fi; }
+    pm2() { printf 'UNEXPECTED PM2 ACTION' > "$JTG_TEST_ROOT/unsafe"; return 99; }
+    repair_project
+  `],{cwd:root,encoding:'utf8',timeout:30_000,env:{...process.env,TERM:'dumb',NO_COLOR:'1',...env}});
+  assert.equal(result.status,128,`${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr,/Your files and owner account are preserved/);
+  assert.equal(existsSync(path.join(temporary,'unsafe')),false);
+  assert.equal(readFileSync(path.join(temporary,'app','data','existing'),'utf8'),'preserve-me');
+}));

@@ -1,8 +1,8 @@
-# Validation of JTG Cloud 1.2.0
+# Validation of JTG Cloud 1.3.0
 
 Verified locally on Windows with Node.js 24.19.0:
 
-- 54 passing checks across the application, transfer, runtime and installer suites, including parent tests; no skipped checks.
+- 67 passing checks across the application, transfer, runtime and installer suites, including parent tests; no skipped checks.
 - Authentication, cookie flags, CSRF, cross-origin protection and rate limits.
 - Single-owner setup, owner protection, admin/member role boundaries and session revocation.
 - Encrypted upload/decrypted download, private account isolation and blocked path traversal.
@@ -16,6 +16,17 @@ Verified locally on Windows with Node.js 24.19.0:
 - Preview refuses to invoke mocked installation/network commands.
 - Private-checkout cloning verified with a local Git fixture: committed source only, no environment/data/untracked files or credential configuration copied, correct branch and GitHub origin.
 - Failed repository authentication stops before project setup.
+- Standard `npm install -g pm2` to the global npm prefix, with `/root/.pm2` used consistently for management; checked with command fixtures.
+- Missing PM2 process entries are recreated by Restart without a separate Start menu.
+- PM2 name collisions, including duplicate names, are rejected before modifying another application.
+- Offline repair backup preserves SQLite, encrypted parts, encryption key and the previous environment without migrating the database first.
+- Repair moves a controlled legacy fixture to its new directory, retains its owner/files/key, and marks setup complete after health/startup succeeds.
+- Absolute managed storage paths migrate along with the directory; custom environment settings remain.
+- Broad removal targets, external/overlapping storage and symlinked storage redirects are refused.
+- Typed uninstall confirmation, cancellation without process changes, complete fixture-directory removal, app-only deletion and preservation of other PM2 applications.
+- Legacy PM2 retirement preserves another app and its startup service. Fetch failure during repair occurs before the running service or existing data is touched.
+- Health checks accept the expected JTG Cloud status/version and reject older versions, unrelated HTTP 200 responses and unhealthy status.
+- **Actual PM2 7.0.4**, using an isolated Windows daemon, temporary data and a local test port: initial ecosystem start, stopped-process restart, missing-entry recreation, app health and encryption-key persistence passed. App-only deletion plus two saves preserved another isolated process in both `dump.pm2` and `dump.pm2.bak`. The daemon and temporary storage were removed afterward.
 - Updater follows a renamed remote default branch; divergent history is refused before renaming the local branch.
 - Default service port 6969, all available IPv4 interfaces and localhost access without a website hostname.
 - Actual browser login and a 115 MiB + 137 byte upload through the computer's IPv4 address on port 6969.
@@ -42,4 +53,4 @@ Verified locally on Windows with Node.js 24.19.0:
 - Responsive dashboard and owner settings at desktop (1440px) and mobile (390px); no horizontal overflow observed.
 - No new browser console errors or warnings during the final theme/settings verification.
 
-Not verified on a live VPS: apt installation, systemd reboot startup and PM2 updates/rollback. Runtime and data-migration checks used isolated local storage; the checks above do not constitute a load test or independent security audit. See README for operating limits and deployment requirements.
+Not verified on a live Linux VPS: apt/Node installation, Linux file permissions, systemd reboot startup, legacy systemd-unit cleanup and updater rollback against a deployed service. Management workflows used controlled fixtures; actual PM2 commands used an isolated Windows daemon. Browser/theme checks listed above were completed for v1.2; v1.3 changes installation and management. These checks do not constitute a load test or independent security audit. See README for operating limits and deployment requirements.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # JTG Cloud updater by JTG Studio.
 set -Eeuo pipefail
-umask 027
+umask 077
 configure_service_env() {
   node --input-type=module - "$APP_DIR" <<'JS'
 import fs from 'node:fs';
@@ -53,44 +53,59 @@ follow_remote_branch() {
 }
 # Parse the complete update before replacing its tracked script on disk.
 main() {
-APP_DIR=/opt/jtg-cloud
-RUNTIME=/opt/jtg-cloud-runtime
-SERVICE_USER=jtgcloud
-PM2="$RUNTIME/pm2/bin/pm2"
-export PATH="$RUNTIME/current/bin:$RUNTIME/pm2/bin:$PATH"
+APP_DIR=/root/jtg-cloud
+export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+export PM2_HOME=/root/.pm2
 [[ $EUID -eq 0 ]] || { printf 'Run with sudo bash update.sh\n' >&2; exit 1; }
 [[ -d "$APP_DIR/.git" && -f "$APP_DIR/.env" ]] || { printf 'A managed installation was not found.\n' >&2; exit 1; }
+[[ ! -L "$APP_DIR" && "$(realpath -e -- "$APP_DIR")" == "$APP_DIR" ]] || { printf 'Unsafe installation directory.\n' >&2; exit 1; }
+[[ ! -L "$APP_DIR/.git" && ! -L "$APP_DIR/.env" ]] || { printf 'Managed Git/environment paths must not be symbolic links.\n' >&2; exit 1; }
+command -v pm2 >/dev/null || { printf 'Global PM2 is missing. Choose Repair / migrate in the latest installer.\n' >&2; exit 1; }
+node -e 'process.exit(Number(process.versions.node.split(".")[0])>=24?0:1)' || { printf 'Node.js 24+ is required. Choose Repair / migrate.\n' >&2; exit 1; }
 cd "$APP_DIR"
 if [[ -t 1 && -z "${NO_COLOR+x}" && "${TERM:-dumb}" != dumb ]]; then
   printf '\n\033[1;36mJTG CLOUD / JTG Studio\033[0m\n\033[1mApplication update\033[0m\n\n'
 else
   printf '\nJTG CLOUD / JTG Studio\nApplication update\n\n'
 fi
-as_cloud() { runuser -u "$SERVICE_USER" -- env PATH="$PATH" PM2_HOME="/home/$SERVICE_USER/.pm2" "$@"; }
-health() { local i; for i in {1..30}; do if curl --fail --silent http://127.0.0.1:6969/api/health >/dev/null; then return 0; fi; sleep 1; done; return 1; }
+health() {
+  local i
+  for i in {1..30}; do
+    if curl --fail --silent http://127.0.0.1:6969/api/health | node -e 'try {const body=JSON.parse(require("node:fs").readFileSync(0,"utf8"));process.exit(body.status==="ok"&&body.version===require("./package.json").version?0:1)} catch {process.exit(1)}'; then return 0; fi
+    sleep 1
+  done
+  printf 'Health failed. Inspect: pm2 logs jtg-cloud --lines 50\n' >&2
+  return 1
+}
+pm2 ping >/dev/null
+state=$(pm2 jlist | node --input-type=module -e '
+import fs from "node:fs";
+const apps=JSON.parse(fs.readFileSync(0,"utf8")).filter(item=>item.name==="jtg-cloud");
+if(apps.some(item=>item.pm2_env?.pm_exec_path!=="/root/jtg-cloud/src/server.mjs")) throw new Error("PM2 name jtg-cloud belongs to another application.");
+console.log(apps.length?"present":"missing");')
 [[ -z "$(git status --porcelain --untracked-files=no)" ]] || { printf 'Tracked source files have local changes. Save them before updating. Data and .env are ignored and preserved.\n' >&2; exit 1; }
 git fetch --prune origin
 follow_remote_branch
 git merge-base --is-ancestor HEAD "origin/$branch" || { printf 'Update is not a fast-forward. Resolve the branch manually.\n' >&2; exit 1; }
 previous=$(git rev-parse HEAD)
 next=$(git rev-parse "origin/$branch")
-if [[ "$previous" == "$next" ]] && grep -qx 'JTG_NETWORK_MODE=direct-v1' .env; then printf 'JTG Cloud is already up to date.\n'; exit 0; fi
+if [[ "$previous" == "$next" ]] && grep -qx 'JTG_NETWORK_MODE=direct-v1' .env; then printf 'JTG Cloud is already up to date. Use installer option 3 to restart, or option 9 to repair.\n'; exit 0; fi
 stopped=0
 env_backup=''
 rollback() {
   local error=$?
   trap - ERR
   printf '\nUpdate failed. Restoring the previous application version. Your data backup is retained.\n' >&2
-  if [[ "$stopped" == 1 ]]; then as_cloud "$PM2" stop jtg-cloud || true; fi
+  if [[ "$stopped" == 1 ]]; then pm2 stop jtg-cloud || true; fi
   # Only tracked source is reset; ignored data, backups and .env are preserved.
   git reset --hard "$previous" || true
   if [[ -n "$env_backup" && -f "$env_backup" ]]; then cp -- "$env_backup" .env || true; fi
   npm ci --omit=dev --ignore-scripts || true
   if [[ "$stopped" == 1 ]]; then
     if previous_restart_safe; then
-      as_cloud "$PM2" restart ecosystem.config.cjs --update-env || true
+      pm2 startOrRestart ecosystem.config.cjs --only jtg-cloud --update-env --interpreter "$(command -v node)" || true
     else
-      as_cloud "$PM2" stop jtg-cloud || true
+      pm2 stop jtg-cloud || true
       printf 'The previous source cannot read the current chunked storage, or compatibility could not be verified. The cloud stays stopped to protect encrypted parts. Restore the complete pre-update backup before starting old source.\n' >&2
     fi
   fi
@@ -98,21 +113,26 @@ rollback() {
   exit "$error"
 }
 trap rollback ERR
-as_cloud "$PM2" stop jtg-cloud
+if [[ "$state" == present ]]; then pm2 stop jtg-cloud; fi
 stopped=1
-as_cloud node --env-file=.env src/cli.mjs backup
+NODE_ENV=development APP_URL= node --env-file=.env src/cli.mjs backup
 mkdir -p "$APP_DIR/backups"
 env_backup=$(mktemp "$APP_DIR/backups/.env-update-XXXXXX")
 chmod 600 "$env_backup"
 cp -- .env "$env_backup"
 git merge --ff-only "origin/$branch"
 configure_service_env
+chown -R root:root "$APP_DIR"
+chmod -R go-rwx "$APP_DIR"
+chmod 600 .env
 npm ci --omit=dev --ignore-scripts
 node scripts/check.mjs
 node --test --test-concurrency=1 tests/*.test.mjs
-as_cloud "$PM2" restart ecosystem.config.cjs --update-env
+pm2 startOrRestart ecosystem.config.cjs --only jtg-cloud --update-env --interpreter "$(command -v node)"
 health
-as_cloud "$PM2" save
+pm2 save
+printf 'Setup completed: %s\n' "$(date -u +%FT%TZ)" > .jtg-installed
+chmod 600 .jtg-installed
 stopped=0
 trap - ERR
 printf '\nJTG Cloud updated successfully. Data, owner account and encryption key were preserved.\n'

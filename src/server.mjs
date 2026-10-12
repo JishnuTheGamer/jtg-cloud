@@ -137,7 +137,7 @@ export async function createApp(overrides = {}) {
       if (req.headers.origin && req.headers.origin !== allowedOrigin) fail(403, 'Cross-origin requests are not allowed.');
       if (req.headers['sec-fetch-site'] === 'cross-site') fail(403, 'Cross-site requests are not allowed.');
     }
-    if (route === '/api/health' && method === 'GET') return json(res, 200, { status: 'ok', version: '1.2.0' });
+    if (route === '/api/health' && method === 'GET') return json(res, 200, { status: 'ok', version: '1.3.0' });
     if (route === '/api/config' && method === 'GET') {
       const s = settings(db);
       return json(res, 200, { siteName: s.siteName, tagline: s.tagline, logo: s.logo, favicon: s.favicon, accent: s.accent, registrationEnabled: s.registrationEnabled, defaultQuota: s.defaultQuota, googleEnabled: false, setupRequired: !db.prepare("SELECT id FROM users WHERE role='owner'").get() });
@@ -372,7 +372,7 @@ export async function createApp(overrides = {}) {
           files: db.prepare("SELECT COUNT(*) AS count FROM entries WHERE kind='file'").get().count,
           used: db.prepare('SELECT COALESCE(SUM(size),0) AS bytes FROM entries').get().bytes,
           diskFree: disk.bavail * disk.bsize, diskTotal: disk.blocks * disk.bsize,
-          settings: settings(db), version: '1.2.0', port: cfg.port });
+          settings: settings(db), version: '1.3.0', port: cfg.port });
       }
       if (route === '/api/admin/users' && method === 'GET') {
         staff(user); return json(res, 200, { users: db.prepare('SELECT * FROM users ORDER BY created_at DESC LIMIT 2000').all().map(u => publicUser(db, u)) });
