@@ -3,7 +3,8 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const GIB = 1024 ** 3, MIB = 1024 ** 2;
-const state = { config: {}, user: null, csrf: '', view: 'files', parent: null, entries: [], crumbs: [], search: '', sort: 'updated', layout: localStorage.getItem('jtg-layout') || 'list', selected: new Set(), loading: false, uploading: false, maxUpload: 512 * MIB, generation: 0 };
+const storage = { get(key) { try { return localStorage.getItem(key); } catch { return null; } }, set(key, value) { try { localStorage.setItem(key, value); } catch {} }, remove(key) { try { localStorage.removeItem(key); } catch {} } };
+const state = { config: {}, user: null, csrf: '', view: 'files', parent: null, entries: [], crumbs: [], search: '', sort: 'updated', layout: storage.get('jtg-layout') || 'list', selected: new Set(), loading: false, uploading: false, maxUpload: 512 * MIB, chunkSize: 20 * MIB, generation: 0, transfer: null };
 const paths = {
  cloud:'M6 18a4 4 0 0 1-.5-8A6.5 6.5 0 0 1 18 9a4.5 4.5 0 1 1 0 9H6Z',
  home:'m3 10 9-7 9 7v10H3V10Zm6 10v-7h6v7',
@@ -33,7 +34,9 @@ const paths = {
  edit:'m15 3 6 6-12 12H3v-6L15 3Zm-3 3 6 6', restore:'M3 3v6h6M3 9a9 9 0 1 1 1 9M12 8v5l3 2',
  check:'m5 12 4 4L19 6', menu:'M3 6h18M3 12h18M3 18h18',
  activity:'M3 12h4l3-8 4 16 3-8h4', move:'M12 3v18M3 12h18m-9-9-3 3m3-3 3 3m-3 15-3-3m3 3 3-3M3 12l3-3m-3 3 3 3m15-3-3-3m3 3-3 3',
- mail:'M3 5h18v14H3V5Zm0 0 9 8 9-8', spark:'m12 3 2 7 7 2-7 2-2 7-2-7-7-2 7-2 2-7'
+ mail:'M3 5h18v14H3V5Zm0 0 9 8 9-8', spark:'m12 3 2 7 7 2-7 2-2 7-2-7-7-2 7-2 2-7',
+ sun:'M12 3v1m0 16v1M3 12h1m16 0h1M5.6 5.6l.7.7m11.4 11.4.7.7m0-12.8-.7.7M6.3 17.7l-.7.7M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z',
+ moon:'M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z', monitor:'M3 4h18v13H3V4Zm5 17h8m-4-4v4', pause:'M8 5v14M16 5v14', arrow:'M4 12h16m-5-5 5 5-5 5'
 };
 const icon = (name, cls = '') => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[name] || paths.file}"/></svg>`;
 const button = (action, name, title, cls = '') => `<button type="button" class="icon-btn ${cls}" data-action="${action}" title="${esc(title)}" aria-label="${esc(title)}">${icon(name)}</button>`;
@@ -58,10 +61,11 @@ async function api(route, options = {}) {
   if (options.body && typeof options.body !== 'string') { options.body = JSON.stringify(options.body); headers['Content-Type'] = 'application/json'; }
   if (options.method && options.method !== 'GET') headers['X-CSRF-Token'] = state.csrf;
   const response = await fetch(route, { ...options, headers, credentials: 'same-origin' });
-  const data = await response.json();
+  let data;
+  try { data = await response.json(); } catch { const error = new Error('The server returned an unexpected response. Please try again.'); error.status = response.status; throw error; }
   if (!response.ok) {
-    if (response.status === 401 && state.user && !route.startsWith('/api/auth/')) { state.user = null; closeModal(true); renderAuth(); }
-    throw new Error(data.error || 'Request failed.');
+    if (response.status === 401 && state.user && !route.startsWith('/api/auth/')) { state.transfer?.xhr?.abort(); state.transfer?.controller?.abort(); if (state.transfer) state.transfer.mode = 'pause'; state.user = null; closeModal(true); renderAuth(); }
+    const error = new Error(data.error || 'Request failed.'); error.status = response.status; throw error;
   }
   return data;
 }
@@ -75,11 +79,21 @@ function applyBrand() {
   $$('[data-brand-name]').forEach(el => el.textContent = c.siteName);
   $$('[data-brand-logo]').forEach(el => el.src = c.logo || '/mark.svg');
 }
+function appearanceControl() { return `<button type="button" class="theme-control" data-action="appearance" aria-label="Change appearance" title="Change appearance">${icon(window.JTGTheme?.theme === 'dark' ? 'moon' : 'sun')}<span>Appearance</span></button>`; }
+function updateAppearance() {
+  $$('[data-action="appearance"]').forEach(el => el.innerHTML = `${icon(window.JTGTheme?.theme === 'dark' ? 'moon' : 'sun')}<span>Appearance</span>`);
+  $$('[data-theme-choice]').forEach(el => { const selected = el.dataset.themeChoice === window.JTGTheme?.preference; el.classList.toggle('active', selected); el.setAttribute('aria-pressed', String(selected)); });
+}
+function appearance() {
+  modal('Make yourself comfortable', `<p>Choose the look that feels right. Your preference stays on this browser.</p><div class="theme-options">${[['light','sun','Light','Clean and bright'],['dark','moon','Dark','Calm after hours'],['system','monitor','System','Follows your device']].map(([value,name,label,description]) => `<button type="button" data-theme-choice="${value}" class="theme-option" aria-pressed="false"><span class="theme-swatch ${value}">${icon(name)}</span><strong>${label}</strong><small>${description}</small>${icon('check','theme-check')}</button>`).join('')}</div>`, '<button class="btn" data-action="close-modal">Done</button>');
+  updateAppearance();
+}
+window.addEventListener('jtg-theme-change', updateAppearance);
 const brand = () => `<div class="brand"><img data-brand-logo src="${esc(state.config.logo || '/mark.svg')}" alt=""><span data-brand-name>${esc(state.config.siteName)}</span></div>`;
 
 function renderAuth(register = false) {
   state.generation++;
-  $('#app').innerHTML = `<div class="auth"><aside class="auth-art">${brand()}<div class="auth-copy"><h1>A little space.<br> A world of <span>possibilities.</span></h1><p>Keep everything that matters together. A private home for your files, on your own server.</p></div><div class="auth-illustration"><div class="auth-cloud">${cloudArt()}</div><div class="floating-file one">${tile('image','blue')}<div><strong>Your memories</strong><small>Photos &amp; moments</small></div></div><div class="floating-file two">${tile('file')}<div><strong>Your next big idea</strong><small>Documents &amp; projects</small></div></div><div class="floating-file three">${tile('lock','green')}<div><strong>Always your space</strong><small>Encrypted at rest</small></div></div></div><div class="auth-foot">${icon('shield')}Self-hosted. Private by design.</div></aside><main class="auth-main"><div class="auth-form"><div class="eyebrow">WELCOME TO YOUR CLOUD</div><h2>${register ? 'Make yourself at home.' : 'Welcome back.'}</h2><p>${register ? 'Create an account and give your files a new home.' : 'Sign in to pick up right where you left off.'}</p>${state.config.setupRequired ? '<div class="setup">Your cloud is ready for its owner.<br>Finish setup in your server terminal:<code>npm run setup</code>Then sign in with the owner account.</div>' : ''}<form id="auth-form" data-register="${register}">${register ? '<div class="field"><label for="displayName">Your name</label><input id="displayName" name="displayName" autocomplete="name" maxlength="60" placeholder="Alex Morgan" required></div><div class="field"><label for="username">Username</label><input id="username" name="username" autocomplete="username" minlength="3" maxlength="32" pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]{2,31}" placeholder="alex.morgan" required></div>' : ''}<div class="field"><label for="identifier">${register ? 'Email address' : 'Email or username'}</label><input id="identifier" name="${register ? 'email' : 'identifier'}" type="${register ? 'email' : 'text'}" autocomplete="${register ? 'email' : 'username'}" placeholder="${register ? 'you@gmail.com' : 'you@gmail.com or your username'}" maxlength="254" required></div><div class="field"><label for="password">Password</label><div class="password-wrap"><input id="password" name="password" type="password" autocomplete="${register ? 'new-password' : 'current-password'}" ${register ? 'minlength="12"' : ''} maxlength="128" placeholder="${register ? 'At least 12 characters' : 'Enter your password'}" required>${button('toggle-password','eye','Show password')}</div>${register ? '<small>Use at least 12 characters. A long passphrase works well.</small>' : ''}</div>${!register ? '<div class="auth-options"><label><input type="checkbox" name="remember">Keep me signed in for 7 days</label><button type="button" class="text-button" data-action="login-help">Need help?</button></div>' : ''}<div id="auth-error" hidden class="modal-error" role="alert"></div><button type="submit" class="btn full">${register ? 'Create account' : 'Sign in'}${icon('chevron')}</button></form><div class="auth-divider">or continue with</div><button class="google-button" disabled title="Google login will be configured in a later version"><span class="google-g">G</span>Google<span class="coming">Coming soon</span></button><div class="auth-switch">${register ? 'Already have an account? <button data-action="auth-login">Sign in</button>' : state.config.registrationEnabled && !state.config.setupRequired ? 'New here? <button data-action="auth-register">Create an account</button>' : 'Registration is closed. Contact your cloud owner.'}</div><div class="auth-privacy">Your files stay on this cloud’s server. Your password stays private.</div></div></main></div>`;
+  $('#app').innerHTML = `<div class="auth"><aside class="auth-art">${brand()}<div class="auth-copy"><h1>Your world.<br> Your files.<br><span>Your cloud.</span></h1><p>A beautifully simple home for everything you create. Secure storage, entirely on your own server.</p></div><div class="auth-illustration"><div class="auth-cloud">${cloudArt()}</div><div class="floating-file one">${tile('image','blue')}<div><strong>Your memories</strong><small>Photos &amp; moments</small></div></div><div class="floating-file two">${tile('file')}<div><strong>Your next big idea</strong><small>Documents &amp; projects</small></div></div><div class="floating-file three">${tile('lock','green')}<div><strong>Always your space</strong><small>Encrypted at rest</small></div></div></div><div class="auth-foot">${icon('shield')}Self-hosted. Private by design.</div></aside><main class="auth-main"><div class="auth-appearance">${appearanceControl()}</div><div class="auth-form"><div class="eyebrow">YOUR PRIVATE WORKSPACE</div><h2>${register ? 'Create your workspace.' : 'Welcome back.'}</h2><p>${register ? 'Create an account and give your files a new home.' : 'Sign in to pick up right where you left off.'}</p>${state.config.setupRequired ? '<div class="setup">Your cloud is ready for its owner.<br>Finish setup in your server terminal:<code>npm run setup</code>Then sign in with the owner account.</div>' : ''}<form id="auth-form" data-register="${register}">${register ? '<div class="field"><label for="displayName">Your name</label><input id="displayName" name="displayName" autocomplete="name" maxlength="60" placeholder="Alex Morgan" required></div><div class="field"><label for="username">Username</label><input id="username" name="username" autocomplete="username" minlength="3" maxlength="32" pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]{2,31}" placeholder="alex.morgan" required></div>' : ''}<div class="field"><label for="identifier">${register ? 'Email address' : 'Email or username'}</label><input id="identifier" name="${register ? 'email' : 'identifier'}" type="${register ? 'email' : 'text'}" autocomplete="${register ? 'email' : 'username'}" placeholder="${register ? 'you@gmail.com' : 'you@gmail.com or your username'}" maxlength="254" required></div><div class="field"><label for="password">Password</label><div class="password-wrap"><input id="password" name="password" type="password" autocomplete="${register ? 'new-password' : 'current-password'}" ${register ? 'minlength="12"' : ''} maxlength="128" placeholder="${register ? 'At least 12 characters' : 'Enter your password'}" required>${button('toggle-password','eye','Show password')}</div>${register ? '<small>Use at least 12 characters. A long passphrase works well.</small>' : ''}</div>${!register ? '<div class="auth-options"><label><input type="checkbox" name="remember">Keep me signed in for 7 days</label><button type="button" class="text-button" data-action="login-help">Need help?</button></div>' : ''}<div id="auth-error" hidden class="modal-error" role="alert"></div><button type="submit" class="btn full">${register ? 'Create account' : 'Sign in'}${icon('chevron')}</button></form><div class="auth-divider">or continue with</div><button class="google-button" disabled title="Google login will be configured in a later version"><span class="google-g">G</span>Google<span class="coming">Coming soon</span></button><div class="auth-switch">${register ? 'Already have an account? <button data-action="auth-login">Sign in</button>' : state.config.registrationEnabled && !state.config.setupRequired ? 'New here? <button data-action="auth-register">Create an account</button>' : 'Registration is closed. Contact your cloud owner.'}</div><div class="auth-privacy">Your files stay on this cloud’s server. Your password stays private.</div></div></main></div>`;
   if (register) $('.auth-form > p').textContent = `Create an account with ${size(state.config.defaultQuota ?? 5 * GIB)} of private storage.`;
   else if (state.config.tagline) $('.auth-form > p').textContent = state.config.tagline;
   applyBrand();
@@ -87,7 +101,7 @@ function renderAuth(register = false) {
 const NAV = [['files','folder','My files'],['recent','clock','Recent'],['starred','star','Starred'],['photos','image','Photos'],['trash','trash','Trash']];
 const STAFF = [['users','users','Members'],['settings','settings','Cloud settings'],['audit','activity','Activity log']];
 function renderShell() {
-  $('#app').innerHTML = `<div class="screen-shade" data-action="close-sidebar"></div><aside class="sidebar">${brand()}<div class="nav-label">YOUR WORKSPACE</div><nav class="nav">${NAV.map(([view,name,label]) => `<button data-view="${view}">${icon(name)}${label}</button>`).join('')}</nav>${state.user.role !== 'member' ? `<div class="nav-divider"></div><div class="nav-label">${state.user.role === 'owner' ? 'CLOUD MANAGEMENT' : 'ADMINISTRATION'}</div><nav class="nav">${STAFF.filter(([v]) => state.user.role === 'owner' || v === 'users').map(([view,name,label]) => `<button data-view="${view}">${icon(name)}${label}${view === 'settings' ? '<span class="count">OWNER</span>' : ''}</button>`).join('')}</nav>` : ''}<div class="storage-widget" id="storage-widget"></div><div class="sidebar-foot">POWERED BY JTG CLOUD</div></aside><div class="workspace"><header class="topbar">${button('toggle-sidebar','menu','Open navigation','mobile-menu')}<div class="search">${icon('search')}<input id="search" placeholder="Search your files…" aria-label="Search files"><span class="kbd">Ctrl K</span></div><div class="topbar-right">${button('help','help','Help')}<div class="topbar-separator"></div><button class="profile" data-action="account" aria-label="Open account settings"><div class="avatar ${state.user.role}">${esc(initials(state.user.displayName))}</div><div class="profile-text"><div class="name">${esc(state.user.displayName)}</div><div class="role">${state.user.role}</div></div>${icon('down')}</button></div></header><main class="content" id="content"></main></div>`;
+  $('#app').innerHTML = `<div class="screen-shade" data-action="close-sidebar"></div><aside class="sidebar">${brand()}<div class="nav-label">YOUR WORKSPACE</div><nav class="nav">${NAV.map(([view,name,label]) => `<button data-view="${view}">${icon(name)}${label}</button>`).join('')}</nav>${state.user.role !== 'member' ? `<div class="nav-divider"></div><div class="nav-label">${state.user.role === 'owner' ? 'CLOUD MANAGEMENT' : 'ADMINISTRATION'}</div><nav class="nav">${STAFF.filter(([v]) => state.user.role === 'owner' || v === 'users').map(([view,name,label]) => `<button data-view="${view}">${icon(name)}${label}${view === 'settings' ? '<span class="count">OWNER</span>' : ''}</button>`).join('')}</nav>` : ''}<div class="storage-widget" id="storage-widget"></div><div class="sidebar-foot"><span class="studio-mark">JTG</span> BY JTG STUDIO</div></aside><div class="workspace"><header class="topbar">${button('toggle-sidebar','menu','Open navigation','mobile-menu')}<div class="search">${icon('search')}<input id="search" placeholder="Search your files…" aria-label="Search files"><span class="kbd">Ctrl K</span></div><div class="topbar-right">${appearanceControl()}${button('help','help','Help')}<div class="topbar-separator"></div><button class="profile" data-action="account" aria-label="Open account settings"><div class="avatar ${state.user.role}">${esc(initials(state.user.displayName))}</div><div class="profile-text"><div class="name">${esc(state.user.displayName)}</div><div class="role">${state.user.role}</div></div>${icon('down')}</button></div></header><main class="content" id="content"></main></div>`;
   applyBrand(); updateUsage(); markNav();
 }
 function updateUsage() {
@@ -122,10 +136,10 @@ function sortedEntries() {
 function renderFiles() {
   const view = state.view, root = view === 'files' && !state.parent && !state.search;
   const title = state.search ? 'Search results' : NAV.find(v => v[0] === view)?.[2] || 'My files';
-  const desc = {files:'A little more organized. A lot more you.',recent:'Everything you’ve worked on lately.',starred:'Your favorites, one click away.',photos:'All your moments, in one place.',trash:'Restore what you need. Make room for what’s next.'};
+  const desc = {files:'Everything you need, exactly where it belongs.',recent:'Everything you’ve worked on lately.',starred:'Your favorites, one click away.',photos:'All your moments, in one place.',trash:'Restore what you need. Make room for what’s next.'};
   const folders = state.entries.filter(e => e.kind === 'folder'), rows = sortedEntries();
   const categories = [{label:'Photos',icon:'image',color:'blue',kind:'Image'},{label:'Documents',icon:'file',color:'',kind:'Document'},{label:'Archives',icon:'archive',color:'orange',kind:'Archive'},{label:'Other files',icon:'grid',color:'green',kind:'Other'}];
-  $('#content').innerHTML = `<div class="page-heading"><div><h1>${esc(title)}</h1><p>${state.search ? `Results for “${esc(state.search)}”` : desc[view]}</p></div><div class="heading-actions">${view === 'trash' ? '<button class="btn secondary" data-action="empty-trash">'+icon('trash')+'Empty trash</button>' : '<button class="btn secondary" data-action="new-folder">'+icon('plus')+'New folder</button><button class="btn" data-action="upload">'+icon('upload')+'Upload files</button>'}</div></div>${state.user.used >= state.user.quota ? '<div class="notice">'+icon('drive')+'Your storage is full. Empty trash or ask your administrator for more space.</div>' : ''}${root ? `<div class="hero"><div><div class="eyebrow">A HOME FOR EVERYTHING</div><h2>Your files. Your little universe.</h2><p>From everyday documents to your favorite memories,<br>keep it all close in ${esc(state.config.siteName)}.</p><button class="btn" data-action="upload">${icon('plus')}Add something new</button></div><div class="cloud-art">${cloudArt()}</div></div><div class="categories">${categories.map(c => { const files = state.entries.filter(e => e.kind === 'file' && (c.kind === 'Other' ? !['Image','Document','Archive'].includes(fileType(e).label) : fileType(e).label === c.kind)); return `<button class="category" data-category="${c.kind}">${tile(c.icon,c.color)}<div><strong>${c.label}</strong><small>${files.length} ${files.length === 1 ? 'file' : 'files'} · ${size(files.reduce((n,f)=>n+f.size,0))}</small></div></button>`; }).join('')}</div>${folders.length ? `<div class="section-title"><h2>Folders</h2><button class="text-button" data-action="new-folder">${icon('plus')}Create folder</button></div><div class="folder-grid">${folders.slice(0,8).map(f => `<button class="folder-card" data-open="${f.id}"><div class="folder-icon">${icon('folder')}</div><div><strong>${esc(f.name)}</strong><small>Updated ${date(f.updatedAt)}</small></div></button>`).join('')}</div>` : ''}` : ''}${state.parent && !state.search ? `<div class="breadcrumbs"><button data-parent="">My files</button>${state.crumbs.map((p,i) => icon('chevron') + (i === state.crumbs.length-1 ? `<span>${esc(p.name)}</span>` : `<button data-parent="${p.id}">${esc(p.name)}</button>`)).join('')}</div>` : ''}<div class="file-panel"><div class="file-toolbar"><h2>${state.parent ? esc(state.crumbs.at(-1)?.name || 'Folder') : root ? 'All files' : esc(title)}</h2><div class="toolbar-controls"><select id="sort" aria-label="Sort files"><option value="updated" ${state.sort === 'updated' ? 'selected' : ''}>Last modified</option><option value="name" ${state.sort === 'name' ? 'selected' : ''}>Name A–Z</option><option value="size" ${state.sort === 'size' ? 'selected' : ''}>Largest first</option></select><div class="segmented"><button data-layout="list" class="${state.layout === 'list' ? 'active' : ''}" aria-label="List view">${icon('list')}</button><button data-layout="grid" class="${state.layout === 'grid' ? 'active' : ''}" aria-label="Grid view">${icon('grid')}</button></div></div></div><div id="selection-toolbar"></div><div id="file-results">${rows.length ? state.layout === 'grid' ? fileGrid(rows) : fileTable(rows) : emptyState(view)}</div><div class="panel-foot"><span>${rows.length} ${rows.length === 1 ? 'item' : 'items'}${state.total > rows.length ? ` · showing first ${rows.length} of ${state.total}; use search to narrow results` : ''}</span><span class="security-note">${icon('shield')}Encrypted at rest · Only you can access your files</span></div></div>`;
+  $('#content').innerHTML = `<div class="page-heading"><div><h1>${esc(title)}</h1><p>${state.search ? `Results for “${esc(state.search)}”` : desc[view]}</p></div><div class="heading-actions">${view === 'trash' ? '<button class="btn secondary" data-action="empty-trash">'+icon('trash')+'Empty trash</button>' : '<button class="btn secondary" data-action="new-folder">'+icon('plus')+'New folder</button><button class="btn" data-action="upload">'+icon('upload')+'Upload files</button>'}</div></div>${state.user.used >= state.user.quota ? '<div class="notice">'+icon('drive')+'Your storage is full. Empty trash or ask your administrator for more space.</div>' : ''}${root ? `<div class="hero"><div><div class="eyebrow">YOUR SPACE. YOUR POSSIBILITIES.</div><h2>Great things start<br>with a little space.</h2><p>Your work, memories, and next big idea.<br>All together in ${esc(state.config.siteName)}.</p><div class="hero-tags"><span>${icon("shield")}Encrypted storage</span><span>${icon("cloud")}Your own server</span></div><button class="btn" data-action="upload">${icon('plus')}Add something new</button></div><div class="cloud-art">${cloudArt()}</div></div><div class="categories">${categories.map(c => { const files = state.entries.filter(e => e.kind === 'file' && (c.kind === 'Other' ? !['Image','Document','Archive'].includes(fileType(e).label) : fileType(e).label === c.kind)); return `<button class="category" data-category="${c.kind}">${tile(c.icon,c.color)}<div><strong>${c.label}</strong><small>${files.length} ${files.length === 1 ? 'file' : 'files'} · ${size(files.reduce((n,f)=>n+f.size,0))}</small></div></button>`; }).join('')}</div>${folders.length ? `<div class="section-title"><h2>Folders</h2><button class="text-button" data-action="new-folder">${icon('plus')}Create folder</button></div><div class="folder-grid">${folders.slice(0,8).map(f => `<button class="folder-card" data-open="${f.id}"><div class="folder-icon">${icon('folder')}</div><div><strong>${esc(f.name)}</strong><small>Updated ${date(f.updatedAt)}</small></div></button>`).join('')}</div>` : ''}` : ''}${state.parent && !state.search ? `<div class="breadcrumbs"><button data-parent="">My files</button>${state.crumbs.map((p,i) => icon('chevron') + (i === state.crumbs.length-1 ? `<span>${esc(p.name)}</span>` : `<button data-parent="${p.id}">${esc(p.name)}</button>`)).join('')}</div>` : ''}<div class="file-panel"><div class="file-toolbar"><h2>${state.parent ? esc(state.crumbs.at(-1)?.name || 'Folder') : root ? 'All files' : esc(title)}</h2><div class="toolbar-controls"><select id="sort" aria-label="Sort files"><option value="updated" ${state.sort === 'updated' ? 'selected' : ''}>Last modified</option><option value="name" ${state.sort === 'name' ? 'selected' : ''}>Name A–Z</option><option value="size" ${state.sort === 'size' ? 'selected' : ''}>Largest first</option></select><div class="segmented"><button data-layout="list" class="${state.layout === 'list' ? 'active' : ''}" aria-label="List view">${icon('list')}</button><button data-layout="grid" class="${state.layout === 'grid' ? 'active' : ''}" aria-label="Grid view">${icon('grid')}</button></div></div></div><div id="selection-toolbar"></div><div id="file-results">${rows.length ? state.layout === 'grid' ? fileGrid(rows) : fileTable(rows) : emptyState(view)}</div><div class="panel-foot"><span>${rows.length} ${rows.length === 1 ? 'item' : 'items'}${state.total > rows.length ? ` · showing first ${rows.length} of ${state.total}; use search to narrow results` : ''}</span><span class="security-note">${icon('shield')}Encrypted at rest · Only you can access your files</span></div></div>`;
   updateSelection();
 }
 function emptyState(view) {
@@ -209,47 +223,241 @@ async function moveEntry(e) {
 }
 
 function uploadMenu() {
-  modal('Add to your cloud',`<button class="menu-option" data-action="pick-files">${icon('upload')}Upload files</button><button class="menu-option" data-action="pick-folder">${icon('folder')}Upload a folder</button><p style="margin:16px 10px 0">Up to ${size(state.maxUpload)} per file. You can also drag files into your workspace.</p>`);
+  modal('Bring it into your cloud', `<div class="upload-welcome">${tile('upload')}<div><strong>A home for every kind of file</strong><small>Photos, documents, archives, and everything in between.</small></div></div><button class="menu-option" data-action="pick-files">${icon('upload')}Choose files${icon('arrow')}</button><button class="menu-option" data-action="pick-folder">${icon('folder')}Choose a folder${icon('arrow')}</button><div class="transfer-info">${icon('shield')}<div><strong>${size(state.chunkSize)} upload parts</strong><small>Up to ${size(state.maxUpload)} per file. Interrupted transfers can be resumed by choosing the same file again within 24 hours.</small></div></div>`);
+}
+function uploadProgress(item, bytes, detail, status) {
+  const row = $(`#upload-${item.index}`); if (!row) return;
+  const percent = item.file.size ? Math.min(100, bytes / item.file.size * 100) : item.status === 'complete' ? 100 : 0;
+  $('.progress', row).style.setProperty('--progress', `${percent}%`);
+  $('.progress', row).setAttribute('aria-valuenow',String(Math.floor(percent)));
+  $('.upload-status', row).textContent = status || `${Math.floor(percent)}%`;
+  $('small', row).textContent = detail || `${size(bytes)} of ${size(item.file.size)}`;
+  row.dataset.status = item.status;
+}
+function transferSummary(transfer) {
+  if (!$('#upload-summary')) return;
+  const count = kind => transfer.items.filter(item => item.status === kind).length;
+  $('#upload-summary').textContent = `${count('complete')} of ${transfer.items.length} uploaded${count('failed') ? ` · ${count('failed')} need attention` : ''}${count('paused') ? ` · ${count('paused')} paused` : ''}${count('canceled') ? ` · ${count('canceled')} canceled` : ''}`;
+}
+function transferButtons(transfer) {
+  const actions = $('.modal-actions'); if (!actions || !$('#upload-list')) return;
+  if (state.uploading) actions.innerHTML = '<button class="btn secondary" data-action="upload-cancel">Cancel uploads</button><button class="btn" data-action="upload-pause">'+icon('pause')+'Pause</button>';
+  else {
+    const pending = transfer.items.some(item => ['paused','failed','queued'].includes(item.status));
+    actions.innerHTML = `${pending ? '<button class="btn secondary" data-action="upload-cancel">Discard pending</button><button class="btn" data-action="upload-resume">'+icon('upload')+'Resume / retry</button>' : ''}<button class="btn secondary" data-action="close-modal">Done</button>`;
+  }
+}
+function pauseTransfer() {
+  const transfer = state.transfer; if (!transfer || !state.uploading) return;
+  transfer.mode = 'pause'; transfer.xhr?.abort(); transfer.controller.abort(); transfer.waiting?.('stop');
+}
+async function cancelTransfer() {
+  const transfer = state.transfer; if (!transfer) return;
+  transfer.mode = 'cancel'; transfer.xhr?.abort(); transfer.controller.abort(); transfer.waiting?.('stop');
+  if (!state.uploading) { state.uploading = true; transferButtons(transfer); try { await discardTransfers(transfer); } finally { state.uploading = false; transferButtons(transfer); transferSummary(transfer); if (state.user) await loadView(); } }
+}
+function abortError() { return new DOMException('Transfer paused.', 'AbortError'); }
+function checkTransfer(transfer) { if (transfer.mode !== 'run' || transfer.controller.signal.aborted || !state.user) throw abortError(); }
+function newUploadId() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const bytes=crypto.getRandomValues(new Uint8Array(16));bytes[6]=(bytes[6]&15)|64;bytes[8]=(bytes[8]&63)|128;
+  const hex=[...bytes].map(byte=>byte.toString(16).padStart(2,'0')).join('');
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+async function fingerprintKey(file, parentId) {
+  if (!window.crypto?.subtle) return null;
+  const head = new Uint8Array(await file.slice(0, 65536).arrayBuffer());
+  const tail = new Uint8Array(await file.slice(Math.max(65536, file.size - 65536)).arrayBuffer());
+  const metadata = new TextEncoder().encode(JSON.stringify([state.user.id, parentId, file.name, file.webkitRelativePath || '', file.size, file.lastModified]));
+  const bytes = new Uint8Array(metadata.length + head.length + tail.length); bytes.set(metadata); bytes.set(head, metadata.length); bytes.set(tail, metadata.length + head.length);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  return `jtg-upload-${state.user.id}-${[...digest].map(byte => byte.toString(16).padStart(2,'0')).join('')}`;
+}
+function rememberUpload(item) {
+  const id = item.upload?.id || item.clientId;
+  if (item.key && id) storage.set(item.key, JSON.stringify({ id, name:item.file.name, size:item.file.size, parentId:item.parentId, lastModified:item.file.lastModified, expiresAt:item.upload?.expiresAt || Date.now()+24*60*60*1000 }));
+}
+function forgetUpload(item) { if (item.key) storage.remove(item.key); }
+function savedUpload(item) {
+  try {
+    const saved = JSON.parse(storage.get(item.key));
+    if (!saved) return null;
+    const expires = typeof saved.expiresAt === 'number' ? saved.expiresAt : Date.parse(saved.expiresAt);
+    if (!/^[a-zA-Z0-9_-]{8,100}$/.test(saved.id) || saved.name !== item.file.name || saved.size !== item.file.size || saved.lastModified !== item.file.lastModified || saved.parentId !== item.parentId || !Number.isFinite(expires) || expires <= Date.now()) { forgetUpload(item); return null; }
+    return saved;
+  } catch { forgetUpload(item); return null; }
+}
+async function chooseResume(transfer, item, upload) {
+  const row = $(`#upload-${item.index}`);
+  if (!row) throw abortError();
+  uploadProgress(item, upload.uploadedBytes, `${size(upload.uploadedBytes)} already uploaded. Resume using the original, unchanged file?`, 'Pending');
+  const choices = $('.upload-choices', row);
+  choices.innerHTML = '<button class="btn soft" data-resume-choice="resume">Resume</button><button class="btn secondary" data-resume-choice="new">Start again</button>';
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = value => { if (settled) return; settled = true; choices.innerHTML = ''; transfer.waiting = null; resolve(value); };
+    transfer.waiting = finish;
+    $$('[data-resume-choice]', choices).forEach(button => button.onclick = () => finish(button.dataset.resumeChoice));
+    if (transfer.mode !== 'run') finish('stop');
+  });
+}
+async function getUpload(transfer, item) {
+  item.key ||= await fingerprintKey(item.file, item.parentId); checkTransfer(transfer);
+  const saved = item.key ? savedUpload(item) : null;
+  const reselected = !!saved && !item.clientId && !item.upload;
+  const id = item.upload?.id || item.clientId || saved?.id;
+  if (id) {
+    item.clientId = id;
+    let upload;
+    try { upload = (await api(`/api/uploads/${id}`, {signal:transfer.controller.signal})).upload; }
+    catch (error) { if ([404,410].includes(error.status)) { forgetUpload(item); item.upload = null; if (error.status === 410) item.clientId = null; } else throw error; }
+    checkTransfer(transfer);
+    if (upload && upload.name === item.file.name && upload.size === item.file.size) {
+      item.upload = upload;
+      if (upload.state === 'complete' || upload.state === 'completed') return upload;
+      const choice = reselected ? await chooseResume(transfer, item, upload) : 'resume'; checkTransfer(transfer);
+      if (choice === 'resume') { item.verifyResume = upload.nextIndex > 0; return upload; }
+      await discardUpload(item); item.upload = null; item.clientId = null; forgetUpload(item);
+    }
+  }
+  checkTransfer(transfer);
+  // A client-generated ID makes creation recoverable even if its acknowledgment is lost.
+  item.clientId ||= newUploadId(); rememberUpload(item);
+  const result = await api('/api/uploads', { method:'POST', body:{ clientId:item.clientId, name:item.file.name, parentId:item.parentId, size:item.file.size, mime:item.file.type || 'application/octet-stream' }, signal:transfer.controller.signal });
+  item.upload = result.upload; rememberUpload(item); return item.upload;
+}
+function sendPart(transfer, item, upload) {
+  return new Promise((resolve,reject) => {
+    const start = upload.uploadedBytes, end = Math.min(start + upload.chunkSize, item.file.size), began = performance.now();
+    const xhr = new XMLHttpRequest(); transfer.xhr = xhr;
+    xhr.open('PUT', `/api/uploads/${upload.id}/chunks/${upload.nextIndex}`);
+    xhr.setRequestHeader('X-CSRF-Token', state.csrf); xhr.setRequestHeader('Content-Type','application/octet-stream'); xhr.timeout = 20 * 60 * 1000;
+    const fail = (message, status = 0) => { const error = new Error(message); error.status = status; reject(error); };
+    xhr.upload.onprogress = event => {
+      const speed = event.loaded / Math.max((performance.now() - began) / 1000, 0.2);
+      if (upload.verifyOnly) uploadProgress(item,upload.verifiedBytes,'Checking your last saved part. Use the original, unchanged file.','Checking');
+      else uploadProgress(item, start + event.loaded, `Part ${upload.nextIndex+1} of ${upload.totalChunks} · ${size(start + event.loaded)} / ${size(item.file.size)} · ${size(speed)}/s`, event.loaded >= end-start ? 'Saving…' : undefined);
+    };
+    xhr.onload = () => {
+      let result; try { result = JSON.parse(xhr.responseText); } catch { fail('The connection returned an unexpected response.'); return; }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(result.upload);
+      else fail(result.error || 'This part could not be uploaded.', xhr.status);
+    };
+    xhr.onerror = () => fail('Connection interrupted.'); xhr.ontimeout = () => fail('This part timed out.'); xhr.onabort = () => reject(abortError());
+    xhr.send(item.file.slice(start,end));
+  }).finally(() => { transfer.xhr = null; });
+}
+function waitForRetry(transfer, milliseconds) {
+  return new Promise((resolve,reject) => {
+    const stopped = () => { clearTimeout(timer); reject(abortError()); };
+    const timer = setTimeout(() => { transfer.controller.signal.removeEventListener('abort',stopped); resolve(); }, milliseconds);
+    transfer.controller.signal.addEventListener('abort',stopped,{once:true});
+    if (transfer.controller.signal.aborted) stopped();
+  });
+}
+async function uploadItem(transfer, item) {
+  item.status = 'uploading'; uploadProgress(item, item.upload?.uploadedBytes || 0, 'Preparing your transfer…', 'Preparing');
+  let upload = await getUpload(transfer, item); checkTransfer(transfer);
+  if (!Number.isSafeInteger(upload.chunkSize) || upload.chunkSize < MIB || upload.chunkSize > 80*MIB || !Number.isSafeInteger(upload.uploadedBytes) || upload.uploadedBytes < 0 || upload.uploadedBytes > item.file.size) throw new Error('The server returned an invalid transfer configuration.');
+  if (item.verifyResume && upload.nextIndex > 0 && !['complete','completed'].includes(upload.state)) {
+    const previousIndex = upload.nextIndex-1;
+    try { upload = await sendPart(transfer,item,{...upload,nextIndex:previousIndex,uploadedBytes:previousIndex*upload.chunkSize,verifyOnly:true,verifiedBytes:upload.uploadedBytes}); }
+    catch(error) { if(error.status===409) throw new Error('This file differs from your saved upload. Choose the original unchanged file, or discard the pending transfer and start again.'); throw error; }
+    item.upload=upload;item.verifyResume=false;rememberUpload(item);checkTransfer(transfer);
+  }
+  while (upload.uploadedBytes < item.file.size) {
+    let sent = false;
+    for (let attempt=0; attempt<4 && !sent; attempt++) {
+      checkTransfer(transfer);
+      try { upload = await sendPart(transfer,item,upload); item.upload = upload; rememberUpload(item); sent = true; }
+      catch (error) {
+        if (error.name === 'AbortError' || transfer.mode !== 'run') throw abortError();
+        if (error.status && ![408,409,425,429,500,502,503,504].includes(error.status)) throw error;
+        if (attempt === 3) throw new Error('Connection interrupted. Your uploaded parts are saved; resume or choose this file again later.');
+        uploadProgress(item, upload.uploadedBytes, `Connection interrupted · retry ${attempt+1} of 3…`, 'Retrying');
+        await waitForRetry(transfer, 1000 * 2 ** attempt);
+        // The server is authoritative: a missing acknowledgment may still mean the part was saved.
+        upload = (await api(`/api/uploads/${upload.id}`,{signal:transfer.controller.signal})).upload;
+        item.upload = upload; rememberUpload(item);
+        if (upload.uploadedBytes >= item.file.size) sent = true;
+      }
+    }
+    checkTransfer(transfer);
+  }
+  uploadProgress(item,item.file.size,'All parts received. Finishing your file…','Finishing');
+  let result;
+  for (let attempt=0;attempt<3;attempt++) {
+    checkTransfer(transfer);
+    try { result = await api(`/api/uploads/${upload.id}/complete`,{method:'POST',body:{},signal:transfer.controller.signal}); break; }
+    catch(error) { if (error.name === 'AbortError' || (error.status && error.status < 500) || attempt === 2) throw error; await waitForRetry(transfer,1000*(attempt+1)); }
+  }
+  forgetUpload(item); item.status = 'complete'; if (result.user) state.user=result.user;
+  uploadProgress(item,item.file.size,`${size(item.file.size)} · Safely in your cloud`,'Complete'); updateUsage();
+}
+async function discardUpload(item) {
+  const id = item.upload?.id || item.clientId; if (!id) return 'canceled';
+  for(let attempt=0;attempt<5;attempt++) {
+    try { await api(`/api/uploads/${id}`,{method:'DELETE'}); return 'canceled'; }
+    catch(error) {
+      if([404,410].includes(error.status))return 'canceled';
+      if(error.status!==409)throw error;
+      const upload=(await api(`/api/uploads/${id}`)).upload;item.upload=upload;
+      if(['complete','completed'].includes(upload.state))return 'complete';
+      if(attempt===4)throw error;
+      await new Promise(resolve=>setTimeout(resolve,200*(attempt+1)));
+    }
+  }
+}
+async function discardTransfers(transfer) {
+  for (const item of transfer.items) {
+    if (item.status === 'complete' || item.status === 'canceled') continue;
+    try { item.status=await discardUpload(item); forgetUpload(item); item.upload=null;item.clientId=null; uploadProgress(item,item.status==='complete'?item.file.size:0,item.status==='complete'?'Your file finished before cancellation.':'Pending parts discarded.',item.status==='complete'?'Complete':'Canceled'); }
+    catch(error) { if ([404,410].includes(error.status)) {forgetUpload(item);item.upload=null;item.status='canceled';uploadProgress(item,0,'Pending parts discarded.','Canceled');} else {item.status='failed';uploadProgress(item,item.upload?.uploadedBytes||0,'Could not discard the pending upload. Try again.','Pending');} }
+  }
+}
+async function runTransfer(transfer) {
+  if (!transfer || state.uploading || !state.user) return;
+  state.uploading = true; transfer.mode='run'; transfer.controller = new AbortController(); transferButtons(transfer);
+  $('#modal-title').textContent = 'Your files are on their way';
+  try {
+    for (const item of transfer.items) {
+      if (['complete','canceled'].includes(item.status)) continue;
+      if (transfer.mode !== 'run') break;
+      try {
+        if (item.file.size > state.maxUpload) throw new Error(`This file exceeds the ${size(state.maxUpload)} limit.`);
+        const relative = item.file.webkitRelativePath?.split('/').slice(0,-1).join('/') || '';
+        if (item.parentId === undefined) item.parentId = relative ? await transfer.ensureFolder(relative) : transfer.destination;
+        checkTransfer(transfer); await uploadItem(transfer,item);
+      } catch(error) {
+        if (error.name === 'AbortError' || transfer.mode !== 'run') { item.status='paused'; uploadProgress(item,item.upload?.uploadedBytes||0,'Your saved parts are ready when you are.','Paused'); break; }
+        item.status='failed'; uploadProgress(item,item.upload?.uploadedBytes||0,error.message,'Needs retry');
+      }
+      transferSummary(transfer);
+    }
+    if (transfer.mode === 'cancel') await discardTransfers(transfer);
+    else if (transfer.mode === 'pause') for(const item of transfer.items) if(item.status==='queued') {item.status='paused';uploadProgress(item,0,'Waiting to resume.','Paused');}
+  } finally {
+    state.uploading=false; transferSummary(transfer); transferButtons(transfer);
+    if ($('#upload-list')) $('#modal-title').textContent = transfer.mode === 'pause' ? 'Paused. Pick up where you left off.' : transfer.items.every(item=>item.status==='complete') ? 'Everything, safely home.' : 'Your transfer summary';
+    $('#file-picker').value=''; $('#folder-picker').value='';
+    if (state.user) await loadView();
+  }
 }
 async function uploadFiles(files) {
-  if (!files.length || state.uploading) return;
-  const destination = state.view === 'files' ? state.parent : null;
-  state.uploading = true;
-  const queue = [...files]; let complete = 0, failed = 0;
-  modal('Uploading to your cloud', `<p>Keep this window open until your files have finished uploading.</p><div id="upload-list">${queue.map((file,i) => `<div class="upload-item" id="upload-${i}">${tile('file')}<div><strong>${esc(file.webkitRelativePath || file.name)}</strong><small>${size(file.size)}</small><div class="progress" style="--progress:0%"><i></i></div></div><span class="upload-status">Queued</span></div>`).join('')}</div><div class="upload-summary" id="upload-summary">0 of ${queue.length} completed</div>`, '<button class="btn secondary" data-action="close-modal" disabled id="upload-done">Done</button>');
-  const folderCache = new Map([['',destination]]);
-  async function ensureFolder(relative) {
-    if (folderCache.has(relative)) return folderCache.get(relative);
-    const parts = relative.split('/'); const name = parts.pop(); const parentId = await ensureFolder(parts.join('/'));
-    try { const result = await api('/api/folders',{method:'POST',body:{name,parentId}}); folderCache.set(relative,result.entry.id); }
-    catch(error) {
-      const listing = await api(`/api/entries?${new URLSearchParams({view:'files',...(parentId?{parent:parentId}:{})})}`);
-      const found = listing.entries.find(e => e.kind === 'folder' && e.name === name); if (!found) throw error; folderCache.set(relative,found.id);
-    }
-    return folderCache.get(relative);
-  }
-  for (let i=0;i<queue.length;i++) {
-    const file = queue[i], row = $(`#upload-${i}`);
-    if (!row) break;
-    try {
-      if (file.size > state.maxUpload) throw new Error(`Exceeds ${size(state.maxUpload)} upload limit`);
-      const relative = file.webkitRelativePath ? file.webkitRelativePath.split('/').slice(0,-1).join('/') : '';
-      const parentId = relative ? await ensureFolder(relative) : destination;
-      $('.upload-status',row).textContent = '0%';
-      const result = await new Promise((resolve,reject) => {
-        const xhr = new XMLHttpRequest(); xhr.open('POST',`/api/upload${parentId ? `?parent=${parentId}` : ''}`);
-        xhr.setRequestHeader('X-CSRF-Token',state.csrf); xhr.setRequestHeader('X-File-Name',encodeURIComponent(file.name)); xhr.setRequestHeader('Content-Type','application/octet-stream');
-        xhr.upload.onprogress = event => { const percent = event.lengthComputable ? Math.round(event.loaded/event.total*100) : 0; $('.progress',row).style.setProperty('--progress',`${percent}%`); $('.upload-status',row).textContent = percent === 100 ? 'Saving…' : `${percent}%`; };
-        xhr.onload = () => { let data; try{data=JSON.parse(xhr.responseText);}catch{reject(new Error('Upload failed. Please try again.'));return;} if(xhr.status>=200 && xhr.status<300)resolve(data);else reject(new Error(data.error || 'Upload failed.')); };
-        xhr.onerror = () => reject(new Error('Connection interrupted. Please try again.')); xhr.send(file);
-      });
-      state.user = result.user; complete++; $('.upload-status',row).innerHTML = icon('check'); updateUsage();
-    } catch(error) {failed++;$('.upload-status',row).textContent='Failed';$('.upload-status',row).style.color='#cc6577';$('small',row).textContent=error.message;}
-    $('#upload-summary').textContent = `${complete} uploaded${failed ? ` · ${failed} failed` : ''} · ${i+1} of ${queue.length} processed`;
-  }
-  state.uploading=false; $('#upload-done').disabled=false;
-  $('#modal-title').textContent = failed ? 'Upload finished with some issues' : 'All files, safely home.';
-  $('#file-picker').value=''; $('#folder-picker').value=''; await loadView();
+  if (!files.length || state.uploading || !state.user) return;
+  const transfer = { items:[...files].map((file,index)=>({file,index,status:'queued',upload:null,key:null})), destination:state.view==='files'?state.parent:null, mode:'run', xhr:null, controller:new AbortController(), waiting:null };
+  state.transfer=transfer;
+  modal('Your files are on their way', `<p class="transfer-description">Sent securely in smaller parts. Pause any time and continue from your last saved part.</p><div class="transfer-pill">${icon('shield')}${size(state.chunkSize)} per part<span>Encrypted storage</span></div><div id="upload-list">${transfer.items.map(item=>`<div class="upload-item" id="upload-${item.index}" data-status="queued">${tile(fileType({name:item.file.name,mime:item.file.type||'application/octet-stream',kind:'file'}).icon)}<div><strong>${esc(item.file.webkitRelativePath||item.file.name)}</strong><small>${size(item.file.size)} · Waiting</small><div class="progress" role="progressbar" aria-label="Upload progress for ${esc(item.file.name)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="--progress:0%"><i></i></div><div class="upload-choices"></div></div><span class="upload-status">Queued</span></div>`).join('')}</div><div class="upload-summary" id="upload-summary" role="status" aria-live="polite">0 of ${transfer.items.length} uploaded</div>`,'<button class="btn secondary" disabled>Preparing…</button>',true);
+  const folders = new Map([['',transfer.destination]]);
+  transfer.ensureFolder=async relative=>{
+    if(folders.has(relative))return folders.get(relative);
+    const parts=relative.split('/'),name=parts.pop(),parentId=await transfer.ensureFolder(parts.join('/'));checkTransfer(transfer);
+    try { const result=await api('/api/folders',{method:'POST',body:{name,parentId},signal:transfer.controller.signal});folders.set(relative,result.entry.id); }
+    catch(error) {checkTransfer(transfer);const listing=await api(`/api/entries?${new URLSearchParams({view:'files',...(parentId?{parent:parentId}:{})})}`,{signal:transfer.controller.signal});const found=listing.entries.find(entry=>entry.kind==='folder'&&entry.name===name);if(!found)throw error;folders.set(relative,found.id);}
+    return folders.get(relative);
+  };
+  // A persistent record stores only the upload ID and file fingerprint, never file contents.
+  await runTransfer(transfer);
 }
 
 function renderUsers(users) {
@@ -273,13 +481,13 @@ function manageUser(id) {
 }
 function renderSettings(info) {
   const s=info.settings;state.settings=s;
-  $('#content').innerHTML=`<div class="page-heading"><div><h1>Your cloud, your way.</h1><p>A few thoughtful settings. A space that feels like yours.</p></div><span class="server-status"><i class="status-dot"></i>Server online · v${esc(info.version)}</span></div><div class="stat-grid">${[[info.users,'Accounts','users',''],[info.files,'Stored files','file','blue'],[size(info.used),'Storage in use','drive','orange'],[size(info.diskFree),'Free server space','cloud','green']].map(([value,label,name,color])=>`<div class="stat-card">${tile(name,color)}<strong>${value}</strong><small>${label}</small></div>`).join('')}</div><form id="settings-form"><div class="settings-grid"><section class="settings-card"><h2>Make it yours</h2><p>Your branding appears on the login page and throughout the cloud.</p><div class="field"><label for="site-name">Cloud name</label><input id="site-name" value="${esc(s.siteName)}" maxlength="40" required></div><div class="field"><label for="site-tagline">Tagline</label><input id="site-tagline" value="${esc(s.tagline)}" maxlength="100"></div><div class="brand-upload"><img id="logo-preview" src="${esc(s.logo||'/mark.svg')}" alt="Logo preview"><div><label for="logo-input">Cloud logo</label><div class="small muted">PNG, JPEG or WebP · up to 1 MB</div><input id="logo-input" type="file" accept="image/png,image/jpeg,image/webp"></div><button type="button" class="icon-btn" data-clear-brand="logo" title="Reset logo" aria-label="Reset logo">${icon('restore')}</button></div><div class="brand-upload"><img id="favicon-preview" src="${esc(s.favicon||'/mark.svg')}" alt="Favicon preview"><div><label for="favicon-input">Browser icon</label><div class="small muted">A square PNG works best</div><input id="favicon-input" type="file" accept="image/png,image/jpeg,image/webp"></div><button type="button" class="icon-btn" data-clear-brand="favicon" title="Reset browser icon" aria-label="Reset browser icon">${icon('restore')}</button></div><div class="field"><label for="accent-color">Accent color</label><input id="accent-color" type="color" value="${esc(s.accent)}"></div></section><section class="settings-card"><h2>Access &amp; storage</h2><p>Decide who can join and how much space they start with.</p><div class="toggle-row" style="border-top:0;padding-top:0"><div><strong>Allow new registrations</strong><small>Let visitors create a member account.</small></div><input id="registration-enabled" class="toggle" type="checkbox" ${s.registrationEnabled?'checked':''} aria-label="Allow registration"></div><div class="field"><label for="default-quota">Default storage per new account (GB)</label><input id="default-quota" type="number" step="0.1" min="0" max="100000" value="${s.defaultQuota/GIB}" required><small>Applies to new members. Existing allowances stay as set.</small></div><div class="field"><label for="max-upload">Maximum size per uploaded file (MB)</label><input id="max-upload" type="number" min="1" max="10240" step="1" value="${s.maxUpload/MIB}" required><small>Uploads also respect the member’s remaining storage.</small></div><div class="notice" style="margin-top:25px;margin-bottom:20px">${icon('shield')}Only you can grant admin access. The owner account is protected from deletion and role changes.</div><div class="toggle-row"><div><strong>Google sign-in</strong><small>Firebase / OAuth integration planned.</small></div><span class="coming">Coming soon</span></div><div class="small muted">Your cloud uses port 6696 behind its reverse proxy. Storage units are binary: 1 GB = 1,024 MB.</div></section></div><div style="display:flex;justify-content:flex-end;margin-top:22px"><button type="submit" class="btn">${icon('check')}Save cloud settings</button></div></form>`;
+  $('#content').innerHTML=`<div class="page-heading"><div><h1>Your cloud, your way.</h1><p>A few thoughtful settings. A space that feels like yours.</p></div><span class="server-status"><i class="status-dot"></i>Server online · v${esc(info.version)}</span></div><div class="stat-grid">${[[info.users,'Accounts','users',''],[info.files,'Stored files','file','blue'],[size(info.used),'Storage in use','drive','orange'],[size(info.diskFree),'Free server space','cloud','green']].map(([value,label,name,color])=>`<div class="stat-card">${tile(name,color)}<strong>${value}</strong><small>${label}</small></div>`).join('')}</div><form id="settings-form"><div class="settings-grid"><section class="settings-card"><h2>Make it yours</h2><p>Your branding appears on the login page and throughout the cloud.</p><div class="field"><label for="site-name">Cloud name</label><input id="site-name" value="${esc(s.siteName)}" maxlength="40" required></div><div class="field"><label for="site-tagline">Tagline</label><input id="site-tagline" value="${esc(s.tagline)}" maxlength="100"></div><div class="brand-upload"><img id="logo-preview" src="${esc(s.logo||'/mark.svg')}" alt="Logo preview"><div><label for="logo-input">Cloud logo</label><div class="small muted">PNG, JPEG or WebP · up to 1 MB</div><input id="logo-input" type="file" accept="image/png,image/jpeg,image/webp"></div><button type="button" class="icon-btn" data-clear-brand="logo" title="Reset logo" aria-label="Reset logo">${icon('restore')}</button></div><div class="brand-upload"><img id="favicon-preview" src="${esc(s.favicon||'/mark.svg')}" alt="Favicon preview"><div><label for="favicon-input">Browser icon</label><div class="small muted">A square PNG works best</div><input id="favicon-input" type="file" accept="image/png,image/jpeg,image/webp"></div><button type="button" class="icon-btn" data-clear-brand="favicon" title="Reset browser icon" aria-label="Reset browser icon">${icon('restore')}</button></div><div class="field"><label for="accent-color">Accent color</label><input id="accent-color" type="color" value="${esc(s.accent)}"></div></section><section class="settings-card"><h2>Access &amp; storage</h2><p>Decide who can join and how much space they start with.</p><div class="toggle-row" style="border-top:0;padding-top:0"><div><strong>Allow new registrations</strong><small>Let visitors create a member account.</small></div><input id="registration-enabled" class="toggle" type="checkbox" ${s.registrationEnabled?'checked':''} aria-label="Allow registration"></div><div class="field"><label for="default-quota">Default storage per new account (GB)</label><input id="default-quota" type="number" step="0.1" min="0" max="100000" value="${s.defaultQuota/GIB}" required><small>Applies to new members. Existing allowances stay as set.</small></div><div class="field"><label for="max-upload">Maximum size per uploaded file (MB)</label><input id="max-upload" type="number" min="1" max="10240" step="1" value="${s.maxUpload/MIB}" required><small>The total file size, across all parts. Uploads also respect the member’s remaining storage.</small></div><div class="field"><label for="upload-chunk-size">Upload part size (MB)</label><input id="upload-chunk-size" type="number" min="1" max="80" step="1" value="${(s.uploadChunkSize||20*MIB)/MIB}" required><small>Default: 20 MB per request. Choose 1–80 MB to suit your tunnel or reverse proxy. Smaller parts help on unreliable connections.</small></div><div class="notice" style="margin-top:25px;margin-bottom:20px">${icon('shield')}Only you can grant admin access. The owner account is protected from deletion and role changes.</div><div class="toggle-row"><div><strong>Google sign-in</strong><small>Firebase / OAuth integration planned.</small></div><span class="coming">Coming soon</span></div><div class="small muted">Your cloud uses port 6696 behind its reverse proxy. Storage units are binary: 1 GB = 1,024 MB.</div></section></div><div style="display:flex;justify-content:flex-end;margin-top:22px"><button type="submit" class="btn">${icon('check')}Save cloud settings</button></div></form>`;
   let brandUpdates={};
   for(const field of ['logo','favicon']) {
     $(`#${field}-input`).onchange=async event=>{const file=event.target.files[0];if(!file)return;if(file.size>MIB){toast('Choose an image smaller than 1 MB.',true);event.target.value='';return;}try{const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=reject;reader.readAsDataURL(file);});brandUpdates[field]=data;$(`#${field}-preview`).src=data;}catch{toast('Could not read that image.',true);}};
     $(`[data-clear-brand="${field}"]`).onclick=()=>{brandUpdates[field]='';$(`#${field}-preview`).src='/mark.svg';$(`#${field}-input`).value='';};
   }
-  $('#settings-form').onsubmit=async event=>{event.preventDefault();const btn=$('button[type=submit]',event.target);btn.disabled=true;try{const result=await api('/api/admin/settings',{method:'PATCH',body:{siteName:$('#site-name').value,tagline:$('#site-tagline').value,accent:$('#accent-color').value,registrationEnabled:$('#registration-enabled').checked,defaultQuota:Math.round(Number($('#default-quota').value)*GIB),maxUpload:Math.round(Number($('#max-upload').value)*MIB),...brandUpdates}});state.config={...state.config,...result.settings};state.maxUpload=result.settings.maxUpload;applyBrand();toast('Your cloud settings are saved.');}catch(error){toast(error.message,true);}btn.disabled=false;};
+  $('#settings-form').onsubmit=async event=>{event.preventDefault();const btn=$('button[type=submit]',event.target);btn.disabled=true;try{const result=await api('/api/admin/settings',{method:'PATCH',body:{siteName:$('#site-name').value,tagline:$('#site-tagline').value,accent:$('#accent-color').value,registrationEnabled:$('#registration-enabled').checked,defaultQuota:Math.round(Number($('#default-quota').value)*GIB),maxUpload:Math.round(Number($('#max-upload').value)*MIB),uploadChunkSize:Math.round(Number($('#upload-chunk-size').value)*MIB),...brandUpdates}});state.config={...state.config,...result.settings};state.maxUpload=result.settings.maxUpload;state.chunkSize=result.settings.uploadChunkSize||20*MIB;applyBrand();toast('Your cloud settings are saved.');}catch(error){toast(error.message,true);}btn.disabled=false;};
 }
 function renderAudit(events) {
   $('#content').innerHTML=`<div class="page-heading"><div><h1>Activity log</h1><p>A clear view of what’s happening in your cloud.</p></div><button class="btn secondary" data-action="refresh">${icon('restore')}Refresh</button></div><div class="file-panel"><div class="file-toolbar"><h2>Recent activity</h2><span class="small muted">Latest 200 events</span></div><table class="file-table admin-table"><thead><tr><th></th><th>Event</th><th>By</th><th>Details</th><th class="date-col">Time</th></tr></thead><tbody>${events.map(e=>`<tr><td>${icon(e.action.startsWith('auth.')?'shield':e.action.startsWith('user.')?'users':'activity')}</td><td style="color:var(--ink)">${esc(e.action.replaceAll('.',' · ').replaceAll('_',' '))}</td><td>${esc(e.username||'System / removed account')}</td><td>${esc(e.detail||'—')}</td><td class="date-col nowrap">${new Date(e.created_at).toLocaleString()}</td></tr>`).join('')}</tbody></table>${!events.length?emptyState('recent'):''}</div>`;
@@ -306,7 +514,7 @@ const actions = {
  'login-help':()=>modal('Need help signing in?', '<p>Use the username or email address you registered with. If you forgot your password, contact the server operator to reset it.</p>', '<button class="btn" data-action="close-modal">Got it</button>'),
  'close-modal':()=>closeModal(),'toggle-sidebar':()=>{$('.sidebar').classList.toggle('open');$('.screen-shade').classList.toggle('open');},'close-sidebar':closeSidebar,
  'new-folder':newFolder,'upload':uploadMenu,'pick-files':()=>{closeModal();$('#file-picker').click();},'pick-folder':()=>{closeModal();$('#folder-picker').click();},
- 'help':help,'account':account,'refresh':loadView,'create-user':createUser,
+ 'help':help,'account':account,'refresh':loadView,'create-user':createUser,'appearance':appearance,'upload-pause':pauseTransfer,'upload-cancel':cancelTransfer,'upload-resume':()=>runTransfer(state.transfer),'upload-retry':()=>runTransfer(state.transfer),
  'logout':async()=>{if(state.uploading){toast('Finish your upload before signing out.');return;}await api('/api/auth/logout',{method:'POST',body:{}});state.user=null;closeModal();renderAuth();},
  'storage-help':()=>modal('Your storage',`<p>You’ve used ${size(state.user.used)} of your ${size(state.user.quota)} allowance. Files in trash also count toward this total.</p><p>To make space, delete files permanently from trash. For a larger allowance, contact your cloud administrator.</p>`,'<button class="btn" data-action="close-modal">Got it</button>'),
  'empty-trash':()=>confirm('Empty your trash?', 'Everything in your trash will be permanently deleted. This cannot be undone.', 'Empty trash',async()=>{await api('/api/trash',{method:'DELETE'});state.selected.clear();toast('Trash emptied. Storage freed.');await loadView();},true),
@@ -317,12 +525,14 @@ const actions = {
 document.addEventListener('click', async event => {
   const target=event.target.closest('button,a,[data-action]');if(!target)return;
   try {
+    if(target.dataset.themeChoice){window.JTGTheme?.set(target.dataset.themeChoice);return;}
+    if(state.uploading && !['upload-pause','upload-cancel','toggle-sidebar','close-sidebar'].includes(target.dataset.action)){if(target.dataset.action||target.dataset.open||target.dataset.entryAction||target.dataset.user){toast('Pause your transfer before opening another dialog.');return;}}
     if(target.dataset.action && actions[target.dataset.action])return await actions[target.dataset.action]();
     if(target.dataset.view)return await navigate(target.dataset.view);
     if('parent' in target.dataset)return await navigate('files',target.dataset.parent || null);
     if(target.dataset.open)return openEntry(target.dataset.open);
     if(target.dataset.entryAction)return await entryAction(target.dataset.entryAction,target.dataset.id);
-    if(target.dataset.layout){state.layout=target.dataset.layout;localStorage.setItem('jtg-layout',state.layout);renderFiles();return;}
+    if(target.dataset.layout){state.layout=target.dataset.layout;storage.set('jtg-layout',state.layout);renderFiles();return;}
     if(target.dataset.user)return manageUser(target.dataset.user);
     if(target.dataset.category){if(target.dataset.category==='Image')return navigate('photos');const kind=target.dataset.category;const rows=sortedEntries().filter(e=>e.kind==='file'&&(kind==='Other'?!['Image','Document','Archive'].includes(fileType(e).label):fileType(e).label===kind));$('#file-results').innerHTML=rows.length?state.layout==='grid'?fileGrid(rows):fileTable(rows):'<div class="empty">'+tile('file')+'<h3>No files in this category yet.</h3><p>Upload files to see them here.</p><button class="btn soft" data-action="refresh">Show all files</button></div>';$('.file-toolbar h2').textContent=kind==='Other'?'Other files':`${kind}s`;state.selected.clear();updateSelection();}
   }catch(error){toast(error.message,true);}
@@ -330,7 +540,7 @@ document.addEventListener('click', async event => {
 document.addEventListener('submit',async event=>{
   if(event.target.id!=='auth-form')return;event.preventDefault();const form=event.target,btn=$('button[type=submit]',form);btn.disabled=true;$('#auth-error').hidden=true;
   const input=Object.fromEntries(new FormData(form));input.remember=input.remember==='on';
-  try{const data=await api(`/api/auth/${form.dataset.register==='true'?'register':'login'}`,{method:'POST',body:input});state.user=data.user;state.csrf=data.csrf;state.view='files';state.parent=null;state.search='';state.selected.clear();const me=await api('/api/me');state.maxUpload=me.maxUpload;renderShell();await loadView();}catch(error){if($('#auth-error')){$('#auth-error').hidden=false;$('#auth-error').textContent=error.message;}btn.disabled=false;}
+  try{const data=await api(`/api/auth/${form.dataset.register==='true'?'register':'login'}`,{method:'POST',body:input});state.user=data.user;state.csrf=data.csrf;state.view='files';state.parent=null;state.search='';state.selected.clear();const me=await api('/api/me');state.maxUpload=me.maxUpload;state.chunkSize=me.uploadChunkSize||me.settings?.uploadChunkSize||20*MIB;renderShell();await loadView();}catch(error){if($('#auth-error')){$('#auth-error').hidden=false;$('#auth-error').textContent=error.message;}btn.disabled=false;}
 });
 let searchTimer;
 document.addEventListener('input',event=>{if(event.target.id==='search'){clearTimeout(searchTimer);const value=event.target.value;searchTimer=setTimeout(()=>{state.view='files';state.parent=null;state.search=value;state.selected.clear();markNav();loadView();},280);}});
@@ -352,6 +562,6 @@ document.addEventListener('dragleave',()=>{dragDepth=Math.max(0,dragDepth-1);if(
 document.addEventListener('drop',event=>{event.preventDefault();dragDepth=0;$('#drop-overlay').hidden=true;if(state.user&&!state.uploading)uploadFiles([...event.dataTransfer.files]).catch(error=>{state.uploading=false;toast(error.message,true);closeModal(true);});});
 window.addEventListener('beforeunload',event=>{if(state.uploading){event.preventDefault();event.returnValue='';}});
 (async()=>{
-  try{state.config=await api('/api/config');applyBrand();try{const me=await api('/api/me');state.user=me.user;state.csrf=me.csrf;state.maxUpload=me.maxUpload;}catch{}if(state.user){renderShell();await loadView();}else renderAuth();}
+  try{state.config=await api('/api/config');applyBrand();try{const me=await api('/api/me');state.user=me.user;state.csrf=me.csrf;state.maxUpload=me.maxUpload;state.chunkSize=me.uploadChunkSize||me.settings?.uploadChunkSize||20*MIB;}catch{}if(state.user){renderShell();await loadView();}else renderAuth();}
   catch(error){$('#app').innerHTML=`<div class="boot"><div><h2>Couldn’t connect to your cloud.</h2><p>${esc(error.message)}</p><button class="btn" id="reload" style="margin-top:15px">Try again</button></div></div>`;$('#reload').onclick=()=>location.reload();}
 })();

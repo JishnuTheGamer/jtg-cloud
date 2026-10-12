@@ -2,6 +2,25 @@
 # JTG Cloud updater by JTG Studio.
 set -Eeuo pipefail
 umask 027
+previous_restart_safe() {
+  node --env-file=.env --input-type=module - "$APP_DIR" <<'JS'
+import fs from 'node:fs';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+const directory = process.argv[2];
+const [major, minor] = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'))).version.split('.').map(Number);
+if (major > 1 || (major === 1 && minor >= 1)) process.exit(0);
+const filename = path.resolve(directory, process.env.DATA_DIR || 'data', 'cloud.sqlite');
+if (!fs.existsSync(filename)) process.exit(0);
+const db = new DatabaseSync(filename, { readOnly: true });
+try {
+  const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
+  const hasNewBlobs = ['file_parts', 'upload_parts'].some(table => tables.has(table) && db.prepare(`SELECT 1 FROM ${table} LIMIT 1`).get());
+  const hasNewEntries = db.prepare('PRAGMA table_info(entries)').all().some(column => column.name === 'storage_format') && db.prepare("SELECT 1 FROM entries WHERE storage_format='chunked' LIMIT 1").get();
+  if (hasNewBlobs || hasNewEntries) process.exitCode = 2;
+} finally { db.close(); }
+JS
+}
 follow_remote_branch() {
   branch=$(git symbolic-ref --short HEAD)
   if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then return 0; fi
@@ -48,8 +67,15 @@ rollback() {
   # Only tracked source is reset; ignored data, backups and .env are preserved.
   git reset --hard "$previous" || true
   npm ci --omit=dev --ignore-scripts || true
-  if [[ "$stopped" == 1 ]]; then as_cloud "$PM2" restart ecosystem.config.cjs --update-env || true; fi
-  printf 'If a future release migrated the database, restore the pre-update backup before running the old code.\n' >&2
+  if [[ "$stopped" == 1 ]]; then
+    if previous_restart_safe; then
+      as_cloud "$PM2" restart ecosystem.config.cjs --update-env || true
+    else
+      as_cloud "$PM2" stop jtg-cloud || true
+      printf 'The previous source cannot read the current chunked storage, or compatibility could not be verified. The cloud stays stopped to protect encrypted parts. Restore the complete pre-update backup before starting old source.\n' >&2
+    fi
+  fi
+  printf 'Source rollback does not restore the database. Keep the pre-update backup for recovery.\n' >&2
   exit "$error"
 }
 trap rollback ERR

@@ -7,13 +7,14 @@ Your files. Your server. A responsive, self-hosted cloud storage panel running o
 - Email or username + password sign-in, registration, persistent sessions, and password changes.
 - One protected **owner**, **administrators**, and **members**, enforced by the server.
 - File and folder uploads, multiple files, drag and drop, nested folders, search, rename, move, starred items, image previews, and downloads.
+- Resumable encrypted uploads using **20 MB chunks by default**, owner-configurable from **1 to 80 MB**, with progress, retry, pause and cancellation.
 - Trash, recursive restore, permanent deletion, and storage accounting that includes trash.
 - Default **5 GB** for new accounts, adjustable per account; owner can change the new-account default or close registration.
 - Owner settings for site name, tagline, logo, favicon, accent color, and upload limits.
 - Administrator member management, owner-only audit log, suspension, and session revocation.
 - AES-256-GCM encryption at rest, scrypt password hashing, hashed server-side session tokens, HttpOnly cookies, CSRF checks, request limits, and account-scoped file access.
 - Interactive `install.sh`, backup and recovery commands, PM2 startup, optional Nginx + Let’s Encrypt setup, and `update.sh` with a pre-update backup and source rollback.
-- Responsive desktop and mobile layouts, keyboard focus, reduced-motion support, and empty states based on real data.
+- Premium light, dark and system themes with a saved browser preference, responsive desktop/mobile layouts, keyboard focus, reduced-motion support and subtle animations.
 
 **Google sign-in is a disabled “Coming soon” option.** Firebase/OAuth is intentionally not configured in this version. Email addresses are account identifiers; SMTP verification and emailed password recovery are not implemented. Forgot-password recovery is performed by the server operator through the CLI.
 
@@ -119,11 +120,21 @@ For a managed installation:
 sudo bash /opt/jtg-cloud/update.sh
 ```
 
-The updater refuses tracked local modifications and non-fast-forward history. It stops PM2, makes a consistent backup of SQLite + encrypted blobs + key, fast-forwards the source, installs locked dependencies, runs syntax and integration tests, restarts and checks health. On failure it restores the previous tracked source and attempts a restart. `.env`, data and backups are ignored and preserved. A future database migration may require restoring the backup before running older source; application rollback alone is not a database rollback. This first version creates its schema idempotently and has no destructive migrations.
+The updater refuses tracked local modifications and non-fast-forward history. It stops PM2, makes a consistent backup of SQLite + encrypted blobs + key, fast-forwards the source, installs locked dependencies, runs syntax and integration tests, restarts and checks health. On failure it restores the previous tracked source and restarts when the storage format is compatible; otherwise it keeps the cloud stopped for backup recovery. `.env`, data and backups are ignored and preserved. Application rollback alone is not a database rollback. Version 1.1 adds tables for encrypted file parts; version 1.0 cannot read the new format. If downgrading after any chunked uploads, restore the matching complete pre-upgrade backup before starting old source. See [release notes](RELEASE-NOTES.md).
 
 For a manual installation, stop your PM2 process, run the backup command below, update the source with `git pull --ff-only`, run `npm ci`, `npm run check` and `npm test`, then restart PM2. Review release notes before migrations.
 
 Node security updates are separate from application updates. The installer chooses the current LTS during initial installation. Periodically update the scoped runtime from official releases, restart PM2 and its startup service with the new executable, and verify health. Runtime and certificate renewal need normal server maintenance.
+
+## Chunked uploads and tunnels
+
+In owner **Settings**, adjust **Upload chunk size** independently from the **Maximum file size**. The default chunk size is **20 MB** (20 MiB / 20 × 1,024² bytes). This is the size of each HTTP request, not a 20 Mbps speed cap. Each upload snapshots its chunk size when it begins, so changing the setting affects new uploads. The full file still must fit the per-file limit and account quota.
+
+The browser sends sequential chunks and retries a failed request safely. **Pause** retains the upload for up to 24 hours; reselect the same file and choose **Resume** to continue, including after a page reload. **Cancel** discards the unfinished transfer and releases its storage reservation. Keep the original file unchanged when resuming. Browser storage retains only resume metadata, not file contents or account passwords.
+
+[Cloudflare documents a 100 MB request upload limit on Free/Pro](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/4xx-client-error/error-413/) and recommends smaller requests. The supported 1–80 MB chunk setting stays below that size. Other proxies can have smaller configured limits; choose a chunk below the smallest limit in your deployment. Chunking reduces oversized-request failures, but does not remove proxy/network timeouts or outages. For slow connections, lower the chunk size.
+
+Downloads use authenticated streaming links; the browser does not collect the entire file in JavaScript memory. New and legacy files support HTTP byte ranges, allowing compatible browsers/download managers to resume. New files authenticate only the requested encrypted parts; legacy files must authenticate their complete ciphertext before the response starts, which can add latency for large old files. Keep proxy buffering disabled and private responses uncached. The application's account permissions, trash state and encryption still apply to downloads.
 
 ## Backups and account recovery
 
@@ -151,10 +162,10 @@ For managed installs use menu option 6. All the account’s sessions are revoked
 
 - The private `data/` directory contains SQLite, encrypted blobs, upload staging and the encryption key. Store it on a protected persistent disk. Do not serve it using Nginx static aliases.
 - Files can have arbitrary extensions, including archives and scripts, because this is private general-purpose storage. They are never executed, unzipped or served as active HTML. Only signature-recognized PNG/JPEG/GIF/WebP files are eligible for same-origin raster preview. Everything else is downloaded as an attachment with `nosniff`.
-- Quota includes files in trash. Uploads are streamed to encrypted staging files, limited per file and by remaining account quota. Concurrent uploads for one account are refused to prevent overcommit. The server also reserves disk space and retains a free-space margin. Configure reverse-proxy upload timeouts for large files.
+- Quota includes files in trash. Uploads are streamed to encrypted staging files, limited per file and by remaining account quota. Paused uploads reserve their full size against account quota; pending bytes also reserve server disk capacity. Concurrent chunk writes for one account are refused to prevent overcommit. Cancellation or expiry releases the reservation. The server retains a free-space margin. Configure reverse-proxy upload timeouts for slow connections.
 - Public uploads are not offered. There is no public sharing endpoint. Administrators cannot browse another member’s files through the panel.
 - Encryption is **server-side encryption at rest**, not end-to-end encryption. Anyone controlling the server or its key can decrypt files. It does not protect against a compromised host. Maintain OS security, TLS, access controls and off-server backups.
-- This is a first functional release, not an independently audited equivalent of Google Drive. There is no MFA, antivirus scanning, resumable uploads, distributed storage, public sharing, email verification or automated SMTP password recovery. Integrate those separately if your deployment requires them.
+- This project is not an independently audited equivalent of Google Drive. There is no MFA, antivirus scanning, distributed storage, public sharing, email verification or automated SMTP password recovery. Integrate those separately if your deployment requires them.
 - Audit events cover login, account changes, file changes and settings; the latest 10,000 are retained, with 200 visible in the owner panel. Audit metadata is not a tamper-proof external log.
 - Listings are capped at 2,000 items; search narrows larger collections. Large multi-user instances need load testing and a storage/database architecture designed for their scale. Default upload limit is 512 MB, configurable up to 10 GB. The app labels binary units as GB/MB (1 GB = 1,024³ bytes).
 

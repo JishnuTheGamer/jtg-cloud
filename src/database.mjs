@@ -52,10 +52,36 @@ export function openStore(dataDir) {
       id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT, action TEXT NOT NULL,
       target TEXT, detail TEXT, created_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS upload_sessions (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      parent_id TEXT, name TEXT NOT NULL, size INTEGER NOT NULL CHECK(size >= 0),
+      chunk_size INTEGER NOT NULL, mime TEXT NOT NULL DEFAULT 'application/octet-stream',
+      state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','complete')),
+      entry_id TEXT REFERENCES entries(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS upload_sessions_user ON upload_sessions(user_id,state);
+    CREATE INDEX IF NOT EXISTS upload_sessions_expiry ON upload_sessions(expires_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS pending_upload_names ON upload_sessions(user_id,COALESCE(parent_id,''),name) WHERE state='pending';
+    CREATE TABLE IF NOT EXISTS upload_parts (
+      upload_id TEXT NOT NULL REFERENCES upload_sessions(id) ON DELETE CASCADE,
+      part_index INTEGER NOT NULL, size INTEGER NOT NULL, blob TEXT UNIQUE NOT NULL,
+      iv TEXT NOT NULL, tag TEXT NOT NULL, sha256 TEXT NOT NULL,
+      PRIMARY KEY(upload_id,part_index)
+    );
+    CREATE TABLE IF NOT EXISTS file_parts (
+      entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+      part_index INTEGER NOT NULL, size INTEGER NOT NULL, blob TEXT UNIQUE NOT NULL,
+      iv TEXT NOT NULL, tag TEXT NOT NULL, sha256 TEXT NOT NULL,
+      PRIMARY KEY(entry_id,part_index)
+    );
   `);
+  if (!db.prepare('PRAGMA table_info(entries)').all().some(column => column.name === 'storage_format')) {
+    db.exec("ALTER TABLE entries ADD COLUMN storage_format TEXT NOT NULL DEFAULT 'legacy'");
+  }
   const defaults = {
     siteName: 'JTG Cloud', tagline: 'Your files. Your cloud.', registrationEnabled: true,
-    defaultQuota: 5 * GiB, maxUpload: 512 * MiB, accent: '#7367f0', logo: '', favicon: ''
+    defaultQuota: 5 * GiB, maxUpload: 512 * MiB, uploadChunkSize: 20 * MiB, accent: '#7367f0', logo: '', favicon: ''
   };
   for (const [name, value] of Object.entries(defaults)) db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run(name, JSON.stringify(value));
   try { chmodSync(path.join(dataDir, 'cloud.sqlite'), 0o600); chmodSync(keyPath, 0o600); } catch { /* Windows uses ACLs. */ }

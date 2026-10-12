@@ -3,6 +3,8 @@
 server {
     listen 80;
     server_name cloud.example.com;
+    # Browser uploads use 20 MiB requests by default (owner-configurable to 80 MiB).
+    # This higher ceiling also permits existing direct-upload API clients.
     client_max_body_size 10G;
     client_body_timeout 900s;
     location / {
@@ -12,6 +14,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # Stream upload chunks and authenticated downloads without buffering to disk.
         proxy_request_buffering off;
         proxy_buffering off;
         proxy_read_timeout 1800s;

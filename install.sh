@@ -199,6 +199,7 @@ ENV
 server {
     listen 80;
     server_name $domain;
+    # Browser uploads use configurable chunks, default 20 MiB per request.
     client_max_body_size 10G;
     client_body_timeout 900s;
     location / {

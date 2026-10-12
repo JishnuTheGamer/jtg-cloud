@@ -1,18 +1,19 @@
 import http from 'node:http';
 import path from 'node:path';
-import { createReadStream, createWriteStream } from 'node:fs';
-import { readFile, rename, unlink, readdir, statfs } from 'node:fs/promises';
-import { randomUUID, randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
+import { createWriteStream } from 'node:fs';
+import { readFile, rename, unlink, statfs } from 'node:fs/promises';
+import { randomUUID, randomBytes, createCipheriv } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
-import { Transform } from 'node:stream';
+import { Transform, Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { config, ROOT, GiB, MiB } from './config.mjs';
 import { openStore, settings, usage, publicUser, audit, transaction } from './database.mjs';
 import { fail, HttpError, token, digest, hashPassword, verifyPassword, identity, entryName, integer, cookies, rateLimiter } from './security.mjs';
 import { acquireLock } from './lock.mjs';
+import { createTransfers, reservedUploads, reservedName, entryBlobs, deleteBlobs, downloadRange, downloadBytes } from './transfers.mjs';
 
 const SESSION = 'jtg_session';
-const STATIC = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/styles.css': ['styles.css', 'text/css; charset=utf-8'], '/mark.svg': ['mark.svg', 'image/svg+xml'] };
+const STATIC = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/theme.js': ['theme.js', 'text/javascript; charset=utf-8'], '/styles.css': ['styles.css', 'text/css; charset=utf-8'], '/mark.svg': ['mark.svg', 'image/svg+xml'] };
 const imageType = bytes => {
   if (bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) return 'image/png';
   if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return 'image/jpeg';
@@ -51,10 +52,6 @@ export async function createApp(overrides = {}) {
   const uploads = new Map();
   let reservedDisk = 0;
   const dummyPassword = await hashPassword(randomBytes(24).toString('hex'));
-  // Clean interrupted uploads and unreferenced encrypted blobs after a restart.
-  for (const name of await readdir(path.join(dataDir, 'tmp'))) if (/^[a-f0-9-]{36}$/.test(name)) await unlink(path.join(dataDir, 'tmp', name)).catch(() => {});
-  const known = new Set(db.prepare('SELECT blob FROM entries WHERE blob IS NOT NULL').all().map(e => e.blob));
-  for (const name of await readdir(path.join(dataDir, 'blobs'))) if (/^[a-f0-9-]{36}$/.test(name) && !known.has(name)) await unlink(path.join(dataDir, 'blobs', name)).catch(() => {});
 
   function current(req) {
     const raw = cookies(req.headers.cookie)[SESSION];
@@ -105,10 +102,15 @@ export async function createApp(overrides = {}) {
   }
   async function removeRows(rows) {
     const ids = new Set(rows.map(e => e.id));
+    transfers.protectsFolders(rows[0]?.user_id, rows.filter(row => row.kind === 'folder').map(row => row.id));
+    const blobs = entryBlobs(db,rows);
     transaction(db, () => { for (const row of rows) if (!row.parent_id || !ids.has(row.parent_id)) db.prepare('DELETE FROM entries WHERE id=?').run(row.id); });
-    for (const row of rows) if (row.blob) await unlink(path.join(dataDir, 'blobs', row.blob)).catch(error => { if (error.code !== 'ENOENT') console.error('Blob cleanup failed:', error.code); });
+    await deleteBlobs(dataDir,blobs);
   }
   function entryView(e) { return { id: e.id, parentId: e.parent_id, name: e.name, kind: e.kind, size: e.size, mime: e.mime, starred: !!e.starred, deletedAt: e.deleted_at, createdAt: e.created_at, updatedAt: e.updated_at }; }
+  const transfers = createTransfers({ db,key,dataDir,activeUploads:uploads,parent,imageType,legacyReservation:() => reservedDisk });
+  try { await transfers.initialize(); }
+  catch (error) { limiter.close(); db.close(); releaseLock(); throw error; }
 
   async function handle(req, res) {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -125,7 +127,7 @@ export async function createApp(overrides = {}) {
       if (req.headers.origin && req.headers.origin !== cfg.appUrl) fail(403, 'Cross-origin requests are not allowed.');
       if (req.headers['sec-fetch-site'] === 'cross-site') fail(403, 'Cross-site requests are not allowed.');
     }
-    if (route === '/api/health' && method === 'GET') return json(res, 200, { status: 'ok', version: '1.0.0' });
+    if (route === '/api/health' && method === 'GET') return json(res, 200, { status: 'ok', version: '1.1.0' });
     if (route === '/api/config' && method === 'GET') {
       const s = settings(db);
       return json(res, 200, { siteName: s.siteName, tagline: s.tagline, logo: s.logo, favicon: s.favicon, accent: s.accent, registrationEnabled: s.registrationEnabled, defaultQuota: s.defaultQuota, googleEnabled: false, setupRequired: !db.prepare("SELECT id FROM users WHERE role='owner'").get() });
@@ -161,7 +163,10 @@ export async function createApp(overrides = {}) {
     if (route.startsWith('/api/')) {
       const { user, session } = current(req);
       if (!['GET','HEAD'].includes(method)) csrf(req, session);
-      if (route === '/api/me' && method === 'GET') return json(res, 200, { user: publicUser(db, user), csrf: session.csrf, maxUpload: settings(db).maxUpload });
+      if (route === '/api/me' && method === 'GET') {
+        const s = settings(db);
+        return json(res,200,{ user:publicUser(db,user),csrf:session.csrf,maxUpload:s.maxUpload,uploadChunkSize:s.uploadChunkSize,settings:{uploadChunkSize:s.uploadChunkSize},reservedUploadBytes:reservedUploads(db,user.id) });
+      }
       if (route === '/api/auth/logout' && method === 'POST') {
         db.prepare('DELETE FROM sessions WHERE token_hash=?').run(session.token_hash); cookie(res, '', 0); return json(res, 200, { ok: true });
       }
@@ -187,27 +192,54 @@ export async function createApp(overrides = {}) {
       }
       if (route === '/api/folders' && method === 'POST') {
         const input = await body(req), name = entryName(input.name), parentId = parent(user.id, input.parentId);
+        if (reservedName(db,user.id,parentId,name)) fail(409,'An upload with that name is waiting to complete.');
         if (breadcrumbs(user.id, parentId).length >= 64) fail(400, 'Folder nesting limit reached.');
         const id = randomUUID(), now = Date.now();
         db.prepare("INSERT INTO entries(id,user_id,parent_id,name,kind,created_at,updated_at) VALUES (?,?,?,?,'folder',?,?)").run(id, user.id, parentId, name, now, now);
         audit(db, user.id, 'folder.create', id, name);
         return json(res, 201, { entry: entryView(entry(user.id, id)) });
       }
+      if (route === '/api/uploads' && method === 'POST') {
+        const result = await transfers.create(user.id,await body(req));
+        return json(res,result.replay ? 200 : 201,{upload:result.upload});
+      }
+      const transferMatch = /^\/api\/uploads\/([a-f0-9-]{36})(?:\/(complete)|\/chunks\/(\d+))?$/.exec(route);
+      if (transferMatch) {
+        const [,id,action,index] = transferMatch;
+        if (!action && index === undefined && method === 'GET') return json(res,200,{upload:transfers.get(user.id,id)});
+        if (index !== undefined && method === 'PUT') return json(res,200,{upload:await transfers.put(user.id,id,Number(index),req)});
+        if (action === 'complete' && method === 'POST') {
+          const result = transfers.complete(user.id,id);
+          if (!result.replay) audit(db,user.id,'file.upload',result.entry.id,result.entry.name);
+          return json(res,result.replay ? 200 : 201,{entry:entryView(result.entry),user:publicUser(db,db.prepare('SELECT * FROM users WHERE id=?').get(user.id))});
+        }
+        if (!action && index === undefined && method === 'DELETE') {
+          await transfers.cancel(user.id,id); return json(res,200,{ok:true});
+        }
+      }
       if (route === '/api/upload' && method === 'POST') {
         if (uploads.has(user.id)) fail(409, 'Another upload is in progress for your account.');
         const parentId = parent(user.id, url.searchParams.get('parent'));
         let name; try { name = entryName(decodeURIComponent(String(req.headers['x-file-name'] || ''))); } catch (error) { if (error instanceof HttpError) throw error; fail(400, 'Invalid filename.'); }
         if (db.prepare('SELECT id FROM entries WHERE user_id=? AND parent_id IS ? AND name=? AND deleted_at IS NULL').get(user.id, parentId, name)) fail(409, 'A file with that name already exists. Rename it first.');
+        if (reservedName(db,user.id,parentId,name)) fail(409,'An upload with that name is waiting to complete.');
         const freshUser = db.prepare('SELECT * FROM users WHERE id=?').get(user.id);
-        const available = freshUser.quota - usage(db, user.id);
+        const available = freshUser.quota - usage(db, user.id) - reservedUploads(db,user.id);
         const max = Math.min(settings(db).maxUpload, available);
         const length = Number(req.headers['content-length']);
         if (!Number.isSafeInteger(length) || length < 0) fail(411, 'A valid Content-Length is required for uploads.');
         if (length > max) fail(413, available < length ? 'Not enough storage. Empty trash or ask an administrator for more space.' : 'This file exceeds the upload limit.');
-        const space = await statfs(dataDir); if (space.bavail * space.bsize - reservedDisk < length + 64 * MiB) fail(507, 'The server is running low on disk space.');
-        // Recheck the lock after statfs awaits; two requests must not reserve the same quota.
-        if (uploads.has(user.id)) fail(409, 'Another upload is in progress for your account.');
-        uploads.set(user.id, true); reservedDisk += length;
+        await transfers.reserveDisk(length,() => {
+          // Recheck after filesystem awaits and reserve before yielding again.
+          if (uploads.has(user.id)) fail(409, 'Another upload is in progress for your account.');
+          parent(user.id,parentId);
+          const currentUser = db.prepare('SELECT * FROM users WHERE id=? AND active=1').get(user.id);
+          if (!currentUser) fail(401,'This account is no longer active.');
+          if (length + usage(db,user.id) + reservedUploads(db,user.id) > currentUser.quota) fail(413,'Not enough storage. Cancel paused uploads or free some space.');
+          if (length > settings(db).maxUpload) fail(413,'This file exceeds the upload limit.');
+          if (reservedName(db,user.id,parentId,name)) fail(409,'An upload with that name is waiting to complete.');
+          uploads.set(user.id,true); reservedDisk += length; transfers.diskChanged();
+        });
         const id = randomUUID(), temp = path.join(dataDir, 'tmp', id), destination = path.join(dataDir, 'blobs', id);
         let size = 0, header = Buffer.alloc(0), committed = false;
         const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', key, iv);
@@ -223,7 +255,8 @@ export async function createApp(overrides = {}) {
           transaction(db, () => {
             parent(user.id, parentId);
             const updated = db.prepare('SELECT * FROM users WHERE id=? AND active=1').get(user.id);
-            if (!updated || size + usage(db, user.id) > updated.quota) fail(413, 'Storage quota changed. Please retry.');
+            if (!updated || size + usage(db, user.id) + reservedUploads(db,user.id) > updated.quota) fail(413, 'Storage quota changed. Please retry.');
+            if (reservedName(db,user.id,parentId,name)) fail(409,'An upload with that name is waiting to complete.');
             const now = Date.now();
             db.prepare("INSERT INTO entries(id,user_id,parent_id,name,kind,size,mime,blob,iv,tag,created_at,updated_at) VALUES (?,?,?,?,'file',?,?,?,?,?,?,?)").run(id, user.id, parentId, name, size, imageType(header) || 'application/octet-stream', id, iv.toString('hex'), cipher.getAuthTag().toString('hex'), now, now);
           });
@@ -231,6 +264,7 @@ export async function createApp(overrides = {}) {
           return json(res, 201, { entry: entryView(entry(user.id, id)), user: publicUser(db, db.prepare('SELECT * FROM users WHERE id=?').get(user.id)) });
         } finally {
           uploads.delete(user.id); reservedDisk -= length;
+          transfers.diskChanged();
           await unlink(temp).catch(() => {});
           if (!committed) await unlink(destination).catch(() => {});
         }
@@ -239,14 +273,38 @@ export async function createApp(overrides = {}) {
       if (match) {
         const [, id, action] = match;
         const e = entry(user.id, id, ['restore','purge'].includes(action));
-        if (action === 'download' && method === 'GET') {
+        if (action === 'download' && ['GET','HEAD'].includes(method)) {
           if (e.kind !== 'file') fail(400, 'Open the folder to download its files.');
+          const etag = `"${e.id}-${e.size}"`;
+          let range;
+          try { range = downloadRange(req.headers['if-range'] && req.headers['if-range'] !== etag ? undefined : req.headers.range,e.size); }
+          catch (error) { if (error.status === 416) res.setHeader('Content-Range',`bytes */${e.size}`); throw error; }
           const inline = url.searchParams.get('preview') === '1' && e.mime.startsWith('image/');
           res.setHeader('Content-Type', inline ? e.mime : 'application/octet-stream');
-          res.setHeader('Content-Length', e.size);
+          res.setHeader('Content-Length', range.length);
+          res.setHeader('Accept-Ranges','bytes'); res.setHeader('ETag',etag);
+          if (range.status === 206) res.setHeader('Content-Range',`bytes ${range.start}-${range.end}/${e.size}`);
           res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename="download"; filename*=UTF-8''${encodeURIComponent(e.name).replace(/'/g,'%27')}`);
-          const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(e.iv, 'hex')); decipher.setAuthTag(Buffer.from(e.tag, 'hex'));
-          await pipeline(createReadStream(path.join(dataDir, 'blobs', e.blob)), decipher, res);
+          res.statusCode = range.status;
+          if (method === 'HEAD') { res.end(); return; }
+          const abort = new AbortController(),closed = () => abort.abort();
+          res.once('close',closed);
+          const source = Readable.from(downloadBytes(db,dataDir,key,e,range,abort.signal));
+          // Keep the response intact until the first part has authenticated, so an
+          // integrity failure can return an error instead of untrusted plaintext.
+          try {
+            for await (const chunk of source) {
+              if (res.destroyed) throw new Error('Download connection closed.');
+              if (!res.write(chunk)) await new Promise((resolve,reject) => {
+                const drain = () => { cleanup(); resolve(); }, disconnected = () => { cleanup(); reject(new Error('Download connection closed.')); };
+                const cleanup = () => { res.off('drain',drain); res.off('close',disconnected); };
+                res.once('drain',drain); res.once('close',disconnected);
+              });
+            }
+            res.end();
+          } finally {
+            res.off('close',closed); abort.abort(); source.destroy();
+          }
           return;
         }
         if (!action && method === 'PATCH') {
@@ -264,19 +322,23 @@ export async function createApp(overrides = {}) {
               if (parents.length + Math.max(...depths.values()) > 64) fail(400, 'Folder nesting limit reached.');
             }
           }
+          if (reservedName(db,user.id,parentId,name)) fail(409,'An upload with that name is waiting to complete.');
           db.prepare('UPDATE entries SET name=?,parent_id=?,starred=?,updated_at=? WHERE id=?').run(name, parentId, starred, Date.now(), id);
           audit(db, user.id, 'entry.update', id, name);
           return json(res, 200, { entry: entryView(entry(user.id, id)) });
         }
         if (!action && method === 'DELETE') {
+          const rows = subtree(user.id,id);
+          transfers.protectsFolders(user.id,rows.filter(row => row.kind === 'folder').map(row => row.id));
           // A distinct per-account deletion timestamp identifies one restore group.
           const now = Math.max(Date.now(), db.prepare('SELECT COALESCE(MAX(deleted_at),0)+1 AS next FROM entries WHERE user_id=?').get(user.id).next);
-          transaction(db, () => { for (const row of subtree(user.id, id)) if (!row.deleted_at) db.prepare('UPDATE entries SET deleted_at=?,updated_at=? WHERE id=?').run(now, now, row.id); });
+          transaction(db, () => { for (const row of rows) if (!row.deleted_at) db.prepare('UPDATE entries SET deleted_at=?,updated_at=? WHERE id=?').run(now, now, row.id); });
           audit(db, user.id, 'entry.trash', id, e.name);
           return json(res, 200, { ok: true });
         }
         if (action === 'restore' && method === 'POST') {
           const p = e.parent_id && db.prepare('SELECT id FROM entries WHERE id=? AND user_id=? AND deleted_at IS NULL').get(e.parent_id, user.id);
+          if (reservedName(db,user.id,p?.id || null,e.name)) fail(409,'An upload with that name is waiting to complete.');
           transaction(db, () => {
             db.prepare('UPDATE entries SET parent_id=? WHERE id=?').run(p?.id || null, id);
             for (const row of subtree(user.id, id)) if (row.deleted_at === e.deleted_at) db.prepare('UPDATE entries SET deleted_at=NULL,updated_at=? WHERE id=?').run(Date.now(), row.id);
@@ -298,7 +360,7 @@ export async function createApp(overrides = {}) {
           files: db.prepare("SELECT COUNT(*) AS count FROM entries WHERE kind='file'").get().count,
           used: db.prepare('SELECT COALESCE(SUM(size),0) AS bytes FROM entries').get().bytes,
           diskFree: disk.bavail * disk.bsize, diskTotal: disk.blocks * disk.bsize,
-          settings: settings(db), version: '1.0.0', port: cfg.port });
+          settings: settings(db), version: '1.1.0', port: cfg.port });
       }
       if (route === '/api/admin/users' && method === 'GET') {
         staff(user); return json(res, 200, { users: db.prepare('SELECT * FROM users ORDER BY created_at DESC LIMIT 2000').all().map(u => publicUser(db, u)) });
@@ -323,7 +385,7 @@ export async function createApp(overrides = {}) {
           const input = await body(req);
           if (Object.keys(input).some(k => k !== 'quota') || !('quota' in input)) fail(403, 'The owner role and account status are protected.');
           const quota = integer(input.quota, 0, 100000 * GiB, 'Quota');
-          if (quota < usage(db,target.id)) fail(400, 'Quota cannot be lower than current usage.');
+          if (quota < usage(db,target.id) + reservedUploads(db,target.id)) fail(400, 'Quota cannot be lower than stored files and pending uploads.');
           if (uploads.has(target.id)) fail(409, 'Finish the current upload before changing storage.');
           db.prepare('UPDATE users SET quota=? WHERE id=?').run(quota,target.id);
           audit(db,user.id,'user.quota',target.id,'Owner storage allowance updated');
@@ -337,17 +399,26 @@ export async function createApp(overrides = {}) {
           const fresh = db.prepare('SELECT * FROM users WHERE id=?').get(target.id);
           let role = fresh.role, quota = fresh.quota, active = fresh.active;
           if ('role' in input) { owner(user); if (!['admin','member'].includes(input.role)) fail(400, 'Role must be admin or member.'); role = input.role; }
-          if ('quota' in input) { quota = integer(input.quota, 0, 100000 * GiB, 'Quota'); if (quota < usage(db, target.id)) fail(400, 'Quota cannot be lower than current usage, including trash.'); }
+          if ('quota' in input) { quota = integer(input.quota, 0, 100000 * GiB, 'Quota'); if (quota < usage(db, target.id) + reservedUploads(db,target.id)) fail(400, 'Quota cannot be lower than current usage, including trash and pending uploads.'); }
           if ('active' in input) { if (typeof input.active !== 'boolean') fail(400, 'Invalid account status.'); active = input.active ? 1 : 0; }
-          db.prepare('UPDATE users SET role=?,quota=?,active=? WHERE id=?').run(role, quota, active, target.id);
-          if (role !== fresh.role || !active) db.prepare('DELETE FROM sessions WHERE user_id=?').run(target.id);
+          const updateAccount = () => {
+            manageable(db.prepare('SELECT * FROM users WHERE id=? AND active=1').get(user.id) || {},db.prepare('SELECT * FROM users WHERE id=?').get(target.id));
+            db.prepare('UPDATE users SET role=?,quota=?,active=? WHERE id=?').run(role, quota, active, target.id);
+            if (role !== fresh.role || !active) db.prepare('DELETE FROM sessions WHERE user_id=?').run(target.id);
+          };
+          if (!active) await transfers.cancelUser(target.id,updateAccount);
+          else updateAccount();
           audit(db, user.id, 'user.update', target.id, `${fresh.username}: ${role}, active=${active}`);
           return json(res, 200, { user: publicUser(db, db.prepare('SELECT * FROM users WHERE id=?').get(target.id)) });
         }
         if (method === 'DELETE') {
           const rows = db.prepare('SELECT * FROM entries WHERE user_id=?').all(target.id);
-          db.prepare('DELETE FROM users WHERE id=?').run(target.id);
-          for (const row of rows) if (row.blob) await unlink(path.join(dataDir, 'blobs', row.blob)).catch(() => {});
+          const blobs = entryBlobs(db,rows);
+          await transfers.cancelUser(target.id,() => {
+            manageable(db.prepare('SELECT * FROM users WHERE id=? AND active=1').get(user.id) || {},db.prepare('SELECT * FROM users WHERE id=?').get(target.id));
+            db.prepare('DELETE FROM users WHERE id=?').run(target.id);
+          });
+          await deleteBlobs(dataDir,blobs);
           audit(db, user.id, 'user.delete', target.id, target.username); return json(res, 200, { ok: true });
         }
       }
@@ -359,6 +430,7 @@ export async function createApp(overrides = {}) {
         if ('registrationEnabled' in input) { if (typeof input.registrationEnabled !== 'boolean') fail(400, 'Invalid registration setting.'); update.registrationEnabled = input.registrationEnabled; }
         if ('defaultQuota' in input) update.defaultQuota = integer(input.defaultQuota, 0, 100000 * GiB, 'Default quota');
         if ('maxUpload' in input) update.maxUpload = integer(input.maxUpload, MiB, 10 * GiB, 'Upload limit');
+        if ('uploadChunkSize' in input) update.uploadChunkSize = integer(input.uploadChunkSize, MiB, 80 * MiB, 'Upload chunk size');
         if ('accent' in input) { if (!/^#[0-9a-f]{6}$/i.test(input.accent)) fail(400, 'Invalid accent color.'); update.accent = input.accent; }
         if ('logo' in input) update.logo = brandingImage(input.logo);
         if ('favicon' in input) update.favicon = brandingImage(input.favicon);
@@ -380,16 +452,26 @@ export async function createApp(overrides = {}) {
   const server = http.createServer((req,res) => {
     handle(req,res).catch(original => {
       const error = sqlError(original);
-      if (!res.headersSent && !res.destroyed) json(res, error.status || 500, { error: error.status ? error.message : 'An unexpected server error occurred.' });
+      if (!res.headersSent && !res.destroyed) {
+        res.removeHeader('Content-Length'); res.removeHeader('Content-Disposition');
+        if (error.status !== 416) res.removeHeader('Content-Range');
+        res.removeHeader('Accept-Ranges'); res.removeHeader('ETag');
+        json(res, error.status || 500, { error: error.status ? error.message : 'An unexpected server error occurred.' });
+      }
       else if (!res.destroyed) res.destroy();
-      if (!error.status) console.error('Request failed:', error.message);
+      const disconnected = (req.aborted || res.destroyed) && ['ABORT_ERR','ECONNRESET','ERR_STREAM_PREMATURE_CLOSE'].includes(error.code);
+      if (!error.status && !disconnected) console.error('Request failed:', error.message);
       // Drain rejected request bodies without buffering them.
       if (!req.destroyed) req.resume();
     });
   });
   server.requestTimeout = 30 * 60000; server.headersTimeout = 30000; server.keepAliveTimeout = 5000;
-  const cleanup = setInterval(() => db.prepare('DELETE FROM sessions WHERE expires_at<?').run(Date.now()), 3600000); cleanup.unref();
-  return { server, db, cfg, async close() { clearInterval(cleanup); limiter.close(); await new Promise(resolve => { server.close(resolve); server.closeIdleConnections(); }); db.close(); releaseLock(); } };
+  let cleaning;
+  const cleanup = setInterval(() => {
+    db.prepare('DELETE FROM sessions WHERE expires_at<?').run(Date.now());
+    if (!cleaning) cleaning = transfers.cleanup().catch(error => console.error('Upload cleanup failed:',error.message)).finally(() => { cleaning = null; });
+  },60000); cleanup.unref();
+  return { server, db, cfg, async close() { clearInterval(cleanup); limiter.close(); await new Promise(resolve => { server.close(resolve); server.closeIdleConnections(); }); if (cleaning) await cleaning; db.close(); releaseLock(); } };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

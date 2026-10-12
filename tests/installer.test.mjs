@@ -143,3 +143,30 @@ test('updater follows a renamed remote branch and refuses divergent history', { 
     rmSync(temporary, { recursive: true, force: true });
   }
 });
+
+test('rollback refuses to start version 1.0 against chunked file storage', { skip: !available }, () => {
+  const temporary = mkdtempSync(path.join(os.tmpdir(), 'jtg-cloud-installer-'));
+  try {
+    shell(['-c', `
+      source ./update.sh
+      APP_DIR="$JTG_TEST_ROOT/application"
+      mkdir -p "$APP_DIR/data"
+      cd "$APP_DIR"
+      printf 'DATA_DIR=./data\\n' > .env
+      printf '{"version":"1.0.0"}\\n' > package.json
+      previous_restart_safe
+      node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/cloud.sqlite');db.exec(\\"CREATE TABLE entries(id TEXT,storage_format TEXT);CREATE TABLE file_parts(entry_id TEXT);CREATE TABLE upload_parts(upload_id TEXT);\\");db.close()"
+      previous_restart_safe
+      node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/cloud.sqlite');db.exec(\\"INSERT INTO entries VALUES ('file','chunked');INSERT INTO file_parts VALUES ('file');\\");db.close()"
+      if previous_restart_safe; then exit 98; fi
+      printf '{"version":"1.1.0"}\\n' > package.json
+      previous_restart_safe
+      printf '{"version":"1.0.0"}\\n' > package.json
+      node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/cloud.sqlite');db.exec(\\"DELETE FROM entries;DELETE FROM file_parts;INSERT INTO upload_parts VALUES ('pending');\\");db.close()"
+      if previous_restart_safe; then exit 98; fi
+    `], { JTG_TEST_ROOT: temporary.replaceAll('\\', '/') });
+  } finally {
+    assert.equal(path.dirname(temporary), os.tmpdir());
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
