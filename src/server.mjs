@@ -137,7 +137,7 @@ export async function createApp(overrides = {}) {
       if (req.headers.origin && req.headers.origin !== allowedOrigin) fail(403, 'Cross-origin requests are not allowed.');
       if (req.headers['sec-fetch-site'] === 'cross-site') fail(403, 'Cross-site requests are not allowed.');
     }
-    if (route === '/api/health' && method === 'GET') return json(res, 200, { status: 'ok', version: '1.3.0' });
+    if (route === '/api/health' && method === 'GET') return json(res, 200, { status: 'ok', version: '1.3.1' });
     if (route === '/api/config' && method === 'GET') {
       const s = settings(db);
       return json(res, 200, { siteName: s.siteName, tagline: s.tagline, logo: s.logo, favicon: s.favicon, accent: s.accent, registrationEnabled: s.registrationEnabled, defaultQuota: s.defaultQuota, googleEnabled: false, setupRequired: !db.prepare("SELECT id FROM users WHERE role='owner'").get() });
@@ -372,7 +372,7 @@ export async function createApp(overrides = {}) {
           files: db.prepare("SELECT COUNT(*) AS count FROM entries WHERE kind='file'").get().count,
           used: db.prepare('SELECT COALESCE(SUM(size),0) AS bytes FROM entries').get().bytes,
           diskFree: disk.bavail * disk.bsize, diskTotal: disk.blocks * disk.bsize,
-          settings: settings(db), version: '1.3.0', port: cfg.port });
+          settings: settings(db), version: '1.3.1', port: cfg.port });
       }
       if (route === '/api/admin/users' && method === 'GET') {
         staff(user); return json(res, 200, { users: db.prepare('SELECT * FROM users ORDER BY created_at DESC LIMIT 2000').all().map(u => publicUser(db, u)) });
@@ -486,7 +486,9 @@ export async function createApp(overrides = {}) {
   return { server, db, cfg, async close() { clearInterval(cleanup); limiter.close(); await new Promise(resolve => { server.close(resolve); server.closeIdleConnections(); }); if (cleaning) await cleaning; db.close(); releaseLock(); } };
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// PM2's Linux fork container imports ESM without replacing process.argv[1].
+const entryFile = fileURLToPath(import.meta.url);
+if ([process.argv[1], process.env.pm_exec_path].filter(Boolean).some(filename => path.resolve(filename) === entryFile)) {
   const app = await createApp();
   app.server.listen(app.cfg.port, app.cfg.host, () => console.log(`JTG Cloud is running on ${app.cfg.host}:${app.cfg.port}\n${serviceUrls(app.cfg.port,app.cfg.host).join('\n')}`));
   app.server.on('error', error => { console.error(error.message); process.exitCode = 1; });

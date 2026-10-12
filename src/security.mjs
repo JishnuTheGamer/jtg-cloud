@@ -8,7 +8,7 @@ export function fail(status, message) { throw new HttpError(status, message); }
 export function token() { return randomBytes(32).toString('base64url'); }
 export function digest(value) { return createHash('sha256').update(value).digest('hex'); }
 export function passwordCheck(password) {
-  if (typeof password !== 'string' || password.length < 12 || password.length > 128) fail(400, 'Use a password of 12–128 characters.');
+  if (typeof password !== 'string' || password.length < 8 || password.length > 128) fail(400, 'Use a password of 8–128 characters.');
 }
 export async function hashPassword(password) {
   passwordCheck(password);

@@ -34,6 +34,25 @@ const mockPm2 = `
   }
 `;
 
+const scopedRemoval = `
+  APP_DIR="$JTG_TEST_ROOT/app"; LEGACY_DIR="$JTG_TEST_ROOT/legacy"
+  LEGACY_HOME="$JTG_TEST_ROOT/home"; LEGACY_RUNTIME="$JTG_TEST_ROOT/runtime"
+  MANAGER_FILE="$JTG_TEST_ROOT/manager.sh"; LOG_FILE="$JTG_TEST_ROOT/install.log"
+  require_root() { return 0; }
+  validate_removal_path() { case "$1" in "$APP_DIR"|"$LEGACY_DIR"|"$LEGACY_HOME"|"$LEGACY_RUNTIME"|"$MANAGER_FILE") return 0;; *) return 99;; esac; }
+  cleanup_pm2_files() { return 0; }
+  legacy_pm2_exists() { return 1; }
+  pgrep() { return 1; }
+  cd() { if [[ "$1" == /root ]]; then builtin cd "$JTG_TEST_ROOT"; else builtin cd "$@"; fi; }
+  rm() {
+    if [[ "$1" == -rf ]]; then
+      [[ "$#" == 4 && "$2" == --one-file-system && "$3" == -- && "$PWD" != "$4" ]] || return 99
+      validate_removal_path "$4" || return 99
+    else [[ "$#" == 3 && "$1" == -f && "$2" == -- && "$3" == "$LOG_FILE" ]] || return 99; fi
+    command rm "$@"
+  }
+`;
+
 test('installer preview is noninteractive and does not invoke system commands', { skip: !available }, () => {
   // Any attempt to perform installation in preview mode must fail the check.
   const output = shell(['-c', `
@@ -255,6 +274,7 @@ test('managed path guard refuses broad and unexpected removal targets', {skip:!a
     rm() { printf 'UNEXPECTED REMOVE\\n' > "$JTG_TEST_ROOT/unsafe"; return 97; }
     for candidate in / /root /opt /root/jtg-cloud/.. /root/other "$JTG_TEST_ROOT"; do
       if (validate_directory "$candidate"); then exit 98; fi
+      if (validate_removal_path "$candidate"); then exit 98; fi
     done
     [[ ! -e "$JTG_TEST_ROOT/unsafe" ]]
   `],env);
@@ -349,17 +369,19 @@ test('restart recreates a missing PM2 entry using the global root account', {ski
   assert.doesNotMatch(actions,/runuser|\/home\/jtgcloud|\/opt\/jtg-cloud-runtime/);
 }));
 
-test('uninstall needs typed confirmation, removes the whole fixture and preserves other apps', {skip:!available}, () => fixture((temporary,env)=>{
+test('uninstall uses Y/N, works repeatedly and preserves other apps', {skip:!available}, () => fixture((temporary,env)=>{
   shell(['-c',`
     source ./install.sh
     APP_DIR="$JTG_TEST_ROOT/app"; LEGACY_DIR="$JTG_TEST_ROOT/legacy"
+    LEGACY_HOME="$JTG_TEST_ROOT/home"; LEGACY_RUNTIME="$JTG_TEST_ROOT/runtime"; MANAGER_FILE="$JTG_TEST_ROOT/manager.sh"
     LOG_FILE="$JTG_TEST_ROOT/install.log"
     mkdir -p "$APP_DIR/.git" "$APP_DIR/data/blobs" "$APP_DIR/backups"
     printf 'DATA_DIR=./data\\nBACKUP_DIR=./backups\\n' > "$APP_DIR/.env"
     printf 'private content' > "$APP_DIR/data/blobs/file"
     printf 'keep another app' > "$JTG_TEST_ROOT/other-app"
     require_root() { return 0; }
-    validate_directory() { [[ "$1" == "$APP_DIR" && -d "$APP_DIR/.git" ]]; }
+    validate_removal_path() { case "$1" in "$APP_DIR"|"$LEGACY_DIR"|"$LEGACY_HOME"|"$LEGACY_RUNTIME"|"$MANAGER_FILE") return 0;; *) return 99;; esac; }
+    cleanup_pm2_files() { return 0; }
     legacy_pm2_exists() { return 1; }
     cd() { if [[ "$1" == /root ]]; then builtin cd "$JTG_TEST_ROOT"; else builtin cd "$@"; fi; }
     rm() {
@@ -368,20 +390,97 @@ test('uninstall needs typed confirmation, removes the whole fixture and preserve
         printf 'remove-project\\n' >> "$JTG_TEST_ROOT/actions"
         command rm -rf -- "$APP_DIR"
       else
-        [[ "$#" == 5 && "$1" == -f && "$2" == -- && "$3" == /root/.pm2/logs/jtg-cloud-out.log && "$4" == /root/.pm2/logs/jtg-cloud-error.log && "$5" == "$LOG_FILE" ]] || return 99
+        [[ "$#" == 3 && "$1" == -f && "$2" == -- && "$3" == "$LOG_FILE" ]] || return 99
       fi
     }
     ${mockPm2}
     MOCK_PM2_APPS='[{"name":"jtg-cloud","pm2_env":{"pm_exec_path":"/root/jtg-cloud/src/server.mjs","status":"online"}},{"name":"other-app","pm2_env":{"pm_exec_path":"/srv/other/server.js","status":"online"}}]'
     uninstall_project <<< 'cancel'
+    uninstall_project <<< 'n'
+    uninstall_project <<< ''
     [[ -d "$APP_DIR" && ! -e "$JTG_TEST_ROOT/actions" ]]
-    uninstall_project <<< 'UNINSTALL JTG CLOUD'
+    uninstall_project <<< 'Y'
+    [[ ! -e "$APP_DIR" && -f "$JTG_TEST_ROOT/other-app" ]]
+    uninstall_project <<< 'yes'
     [[ ! -e "$APP_DIR" && -f "$JTG_TEST_ROOT/other-app" ]]
     [[ "$MOCK_PM2_APPS" == '[{"name":"other-app","pm2_env":{"pm_exec_path":"/srv/other/server.js","status":"online"}}]' ]]
   `],env);
   const actions=readFileSync(path.join(temporary,'actions'),'utf8');
-  assert.match(actions,/delete jtg-cloud\n\/root\/\.pm2\|save --force\n\/root\/\.pm2\|save --force\nremove-project/);
+  assert.match(actions,/delete jtg-cloud\n\/root\/\.pm2\|save --force\n\/root\/\.pm2\|save --force/);
+  assert.match(actions,/remove-project/);
   assert.doesNotMatch(actions,/delete other-app|kill|unstartup/);
+}));
+
+test('partial and duplicate leftovers uninstall completely, then a new install gets a new owner and key', {skip:!available}, () => fixture((temporary,env)=>{
+  shell(['-c',`
+    source ./install.sh
+    ${scopedRemoval}
+    SOURCE_DIR="$JTG_TEST_ROOT/source"
+    mkdir -p "$SOURCE_DIR" "$APP_DIR" "$LEGACY_DIR" "$LEGACY_HOME" "$LEGACY_RUNTIME"
+    cp -R ./src "$SOURCE_DIR/src"
+    cp package.json package-lock.json .env.example .gitignore "$SOURCE_DIR/"
+    git init --quiet --initial-branch=jtg-studio "$SOURCE_DIR"
+    git -C "$SOURCE_DIR" add .
+    git -C "$SOURCE_DIR" -c user.name='Fresh Install Test' -c user.email='test@example.invalid' commit --quiet -m fixture
+    git -C "$SOURCE_DIR" remote add origin "$REPO_URL"
+    cp -R "$SOURCE_DIR/src" "$APP_DIR/src"
+    cp "$SOURCE_DIR/package.json" "$APP_DIR/package.json"
+    cp "$SOURCE_DIR/.env.example" "$APP_DIR/.env"
+    printf 'partial old source' > "$LEGACY_DIR/leftover"
+    printf 'old runtime' > "$LEGACY_RUNTIME/leftover"
+    printf 'old home' > "$LEGACY_HOME/leftover"
+    printf 'old manager' > "$MANAGER_FILE"
+    cd "$APP_DIR"
+    printf '%s' '{"displayName":"Old Owner","username":"old-owner","email":"old@example.invalid","password":"Old-fixture-password-123"}' | node --env-file=.env src/cli.mjs setup --stdin
+    cp data/encryption.key "$JTG_TEST_ROOT/key-before"
+    mkdir backups
+    printf 'old backup' > backups/old-backup
+    # A half-uninstalled application has no Git metadata or package.json.
+    command rm -f package.json .env
+    pm2() {
+      case "$1" in
+        jlist) printf '%s\\n' "$MOCK_PM2_APPS";;
+        delete) [[ "$2" == jtg-cloud ]] || return 99; MOCK_PM2_APPS='[]';;
+      esac
+    }
+    MOCK_PM2_APPS='[{"name":"jtg-cloud","pm2_env":{"pm_exec_path":"/root/jtg-cloud/src/server.mjs","status":"errored"}}]'
+    uninstall_project <<< 'y'
+    for target in "$APP_DIR" "$LEGACY_DIR" "$LEGACY_HOME" "$LEGACY_RUNTIME" "$MANAGER_FILE"; do [[ ! -e "$target" ]]; done
+    uninstall_project <<< 'Y'
+    linux_requirements() { return 0; }
+    npm() { return 0; }
+    chown() { return 0; }; chmod() { return 0; }
+    health() { return 0; }
+    ensure_owner() { printf '%s' '{"displayName":"New Owner","username":"new-owner","email":"new@example.invalid","password":"New-fixture-password-123"}' | node --env-file=.env src/cli.mjs setup --stdin; }
+    install_project
+    [[ -f "$APP_DIR/.jtg-installed" && ! -e "$APP_DIR/backups/old-backup" ]]
+    node --input-type=module - "$JTG_TEST_ROOT/key-before" <<'JS'
+import fs from 'node:fs';
+import {DatabaseSync} from 'node:sqlite';
+if(fs.readFileSync('data/encryption.key').equals(fs.readFileSync(process.argv[2]))) process.exit(98);
+const db=new DatabaseSync('data/cloud.sqlite',{readOnly:true});
+const owners=db.prepare("SELECT username FROM users WHERE role='owner'").all();
+if(owners.length!==1||owners[0].username!=='new-owner'||db.prepare("SELECT id FROM users WHERE username='old-owner'").get()) process.exit(98);
+db.close();
+JS
+  `],env);
+  assert.equal(existsSync(path.join(temporary,'legacy')),false);
+  assert.equal(existsSync(path.join(temporary,'runtime')),false);
+  assert.equal(existsSync(path.join(temporary,'home')),false);
+  assert.equal(existsSync(path.join(temporary,'manager.sh')),false);
+  assert.equal(existsSync(path.join(temporary,'app','.git')),true);
+}));
+
+test('failed removal is reported without claiming uninstall success', {skip:!available}, () => fixture((temporary,env)=>{
+  shell(['-c',`
+    source ./install.sh
+    ${scopedRemoval}
+    mkdir -p "$APP_DIR"
+    printf 'keep until removal succeeds' > "$APP_DIR/leftover"
+    rm() { return 1; }
+    if (remove_managed_path "$APP_DIR"); then exit 98; fi
+    [[ -f "$APP_DIR/leftover" ]]
+  `],env);
 }));
 
 test('repair migrates an older fixture after a backup and retains its owner and files', {skip:!available}, () => fixture((temporary,env)=>{
@@ -462,6 +561,7 @@ test('health validation requires the expected cloud response and version', {skip
     cd "$JTG_TEST_ROOT/app"
     printf '{"version":"1.3.0"}\\n' > package.json
     curl() { printf '%s' "$MOCK_HEALTH"; }
+    pm2() { return 0; }
     sleep() { return 0; }
     MOCK_HEALTH='{"status":"ok","version":"1.3.0"}'
     health

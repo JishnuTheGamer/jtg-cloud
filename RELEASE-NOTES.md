@@ -1,4 +1,14 @@
-# JTG Cloud 1.3.0
+# JTG Cloud 1.3.1
+
+Uninstall now uses **Y/N** confirmation and cleans both current and legacy project directories, including empty/partial leftovers without source metadata. Repeated uninstall succeeds, and the menu stays open for a fresh install. Unused old service-home/runtime artifacts, the downloaded manager and cloud-specific logs/PID files are cleaned; other running applications and shared dependencies are protected. Mounted filesystems are refused before removal.
+
+Regression checks cover uninstall twice, cancellation, failed deletion and cleanup followed by a real new SQLite owner and encryption key. Existing accounts, keys and backups inside the removed project are not reused by the new install.
+
+Minimum password length is now **8 characters** across owner setup, registration, account creation, changes and terminal recovery, with matching web form hints. Eight digits are accepted; existing password hashes continue to work.
+
+The HTTP service now starts when PM2's Linux fork wrapper imports the ESM entrypoint. Previously PM2 could display “online” without an HTTP listener because the direct-launch check failed. PM2 configuration explicitly reads the managed `.env`, replacing stale port/origin/storage values. Health requests bypass proxies, have timeouts, and display the response/server logs on failure.
+
+## JTG Cloud 1.3.0
 
 The VPS installer now uses **`/root/jtg-cloud`**, standard **`npm install -g pm2`** and root's **`/root/.pm2`**. Setup, storage ownership, process management and reboot startup use the same account, resolving the previous source/runtime permission mismatch. Restart recreates a missing process entry; Stop remains optional.
 

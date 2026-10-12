@@ -1,8 +1,8 @@
-# Validation of JTG Cloud 1.3.0
+# Validation of JTG Cloud 1.3.1
 
 Verified locally on Windows with Node.js 24.19.0:
 
-- 67 passing checks across the application, transfer, runtime and installer suites, including parent tests; no skipped checks.
+- 72 passing checks across the application, transfer, runtime and installer suites, including parent tests; no skipped checks.
 - Authentication, cookie flags, CSRF, cross-origin protection and rate limits.
 - Single-owner setup, owner protection, admin/member role boundaries and session revocation.
 - Encrypted upload/decrypted download, private account isolation and blocked path traversal.
@@ -23,7 +23,12 @@ Verified locally on Windows with Node.js 24.19.0:
 - Repair moves a controlled legacy fixture to its new directory, retains its owner/files/key, and marks setup complete after health/startup succeeds.
 - Absolute managed storage paths migrate along with the directory; custom environment settings remain.
 - Broad removal targets, external/overlapping storage and symlinked storage redirects are refused.
-- Typed uninstall confirmation, cancellation without process changes, complete fixture-directory removal, app-only deletion and preservation of other PM2 applications.
+- Y/N uninstall confirmation, default-No cancellation without process changes, repeated uninstall, complete fixture-directory removal, app-only deletion and preservation of other PM2 applications.
+- Partial/duplicate legacy folders, unused runtime/home files and a manager file are removed without Git/package/environment metadata. Cleanup followed by a new installation creates a new SQLite owner and encryption key; old accounts and project backups are absent.
+- Failed deletion is reported and does not claim successful uninstall.
+- Eight-digit owner setup/login and eight-character registration, password change, managed-account creation and terminal recovery; seven-character passwords are rejected and changed/reset sessions are revoked.
+- Linux-style PM2 ESM import with a different `process.argv[1]` starts a real HTTP listener and returns the current healthy version; private temporary storage is used.
+- PM2 configuration reads `.env` explicitly, overriding stale port/origin/storage settings and preserving blank fields that clear old values.
 - Legacy PM2 retirement preserves another app and its startup service. Fetch failure during repair occurs before the running service or existing data is touched.
 - Health checks accept the expected JTG Cloud status/version and reject older versions, unrelated HTTP 200 responses and unhealthy status.
 - **Actual PM2 7.0.4**, using an isolated Windows daemon, temporary data and a local test port: initial ecosystem start, stopped-process restart, missing-entry recreation, app health and encryption-key persistence passed. App-only deletion plus two saves preserved another isolated process in both `dump.pm2` and `dump.pm2.bak`. The daemon and temporary storage were removed afterward.

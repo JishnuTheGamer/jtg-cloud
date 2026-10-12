@@ -37,7 +37,7 @@ npm start
 
 On PowerShell use `Copy-Item .env.example .env`. Open **http://localhost:6969**, or **http://SERVER_IPV4:6969** using an IPv4 address assigned to the server. The app binds to `0.0.0.0:6969` and prints available addresses at startup. Remote access requires your network/firewall to permit that port; the installer does not change firewall rules.
 
-Create the one owner account during terminal setup. There is no default password or web owner-creation endpoint. Passwords must have 12–128 characters. `npm run dev` restarts the service when source changes.
+Create the one owner account during terminal setup. There is no default password or web owner-creation endpoint. Passwords must have 8–128 characters; eight digits are also accepted. `npm run dev` restarts the service when source changes.
 
 The service runs directly over HTTP. `APP_URL` is blank by default, so localhost and IP access work without a hostname setup. It checks the request's own origin and service port, rejects arbitrary DNS hostnames in this mode, and retains authenticated-route CSRF protection. Cookies work on direct HTTP and remain HttpOnly/SameSite. `TRUST_PROXY` is false by default.
 
@@ -88,9 +88,15 @@ Repair installs global PM2, fetches the current source before stopping the cloud
 
 ## Uninstall
 
-Run `sudo bash /root/jtg-cloud/install.sh` and choose **10**. Enter **`UNINSTALL JTG CLOUD`** when prompted. This removes the cloud's PM2 entry, updates saved process lists and **deletes the complete project directory**, including accounts, uploads, encryption key, environment and backups inside it. Copy a backup outside the project first if you want to retain it.
+Run the latest manager and choose **10**:
 
-Global Node.js/PM2 and other applications remain installed. The root PM2 startup service is shared and remains available. The old `jtgcloud` startup is disabled/removed when its process list is empty; the old runtime and service home are retained as recovery artifacts. A separately downloaded `jtg-cloud-manager.sh` is outside the project and can be deleted after use. Uninstall refuses symbolic-link installation paths and external data/backup directories.
+```sh
+bash <(curl -fsSL https://raw.githubusercontent.com/JishnuTheGamer/jtg-cloud/jtg-studio/install.sh)
+```
+
+Answer **Y** to delete, or **N/Enter** to cancel. Uninstall removes the cloud's PM2 entry, updates both saved process lists and **deletes the complete current and old project directories**, including accounts, uploads, encryption key, environment and backups inside them. It also cleans empty/partial leftovers without requiring `.git`, `package.json` or `.env`. Repeating uninstall is safe. After cleanup, the menu remains open: choose **1** for a fresh installation with a new owner and encryption key. Copy a backup outside the project first if you want to retain it.
+
+Global Node.js/PM2 and other applications remain installed. An empty PM2 daemon is stopped; the shared root startup service remains available. The old `jtgcloud` startup is disabled/removed when its process list is empty. The unused `/home/jtgcloud`, `/opt/jtg-cloud-runtime`, `/root/jtg-cloud-manager.sh` and app-specific logs/PID files are cleaned too. A service home or old runtime potentially shared with other running apps is preserved with a message. Named removal targets are checked; symlinks are only unlinked and filesystem mounts must be unmounted first. Custom storage/backups outside the managed folders are not deleted.
 
 ## Roles and quotas
 

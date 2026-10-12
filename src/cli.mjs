@@ -26,7 +26,7 @@ async function credentials() {
   const displayName = await ask('Owner display name: ');
   const username = await ask('Owner username: ');
   const email = await ask('Owner email: ');
-  const password = await ask('Owner password (12+ characters, hidden): ', true);
+  const password = await ask('Owner password (8+ characters, hidden): ', true);
   const confirm = await ask('Repeat password: ', true);
   if (password !== confirm) throw new Error('Passwords do not match.');
   return { displayName, username, email, password };
@@ -48,7 +48,7 @@ try {
     console.log(`\nOwner @${data.username} created. Sign in at ${cfg.appUrl}\n`);
   } else if (command === 'reset-password') {
     store = openStore(cfg.dataDir);
-    const input = process.argv.includes('--stdin') ? await stdinJson() : { identifier: await ask('Account email or username: '), password: await ask('New password (12+ characters, hidden): ',true) };
+    const input = process.argv.includes('--stdin') ? await stdinJson() : { identifier: await ask('Account email or username: '), password: await ask('New password (8+ characters, hidden): ',true) };
     const identifier = String(input.identifier || '').trim().toLowerCase();
     const user = store.db.prepare('SELECT * FROM users WHERE username=? OR email=?').get(identifier,identifier);
     if (!user) throw new Error('Account not found.');

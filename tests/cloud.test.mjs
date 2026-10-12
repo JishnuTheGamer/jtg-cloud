@@ -12,7 +12,7 @@ import { GiB, ROOT } from '../src/config.mjs';
 test('JTG Cloud authentication, isolation, storage, permissions and recovery', async t => {
   const temp = await mkdtemp(path.join(os.tmpdir(),'jtg-cloud-test-'));
   const dataDir=path.join(temp,'data');
-  const ownerInput={username:'cloudowner',email:'owner@example.com',displayName:'Cloud Owner',password:'A long owner passphrase!'};
+  const ownerInput={username:'cloudowner',email:'owner@example.com',displayName:'Cloud Owner',password:'12345678'};
   let app;
   const cli=(command,input,extra=[])=>spawnSync(process.execPath,['src/cli.mjs',command,'--stdin',...extra],{cwd:ROOT,input:JSON.stringify(input),encoding:'utf8',env:{...process.env,DATA_DIR:dataDir,BACKUP_DIR:path.join(temp,'backups'),NODE_ENV:'development',APP_URL:'http://localhost:6969'}});
   try {

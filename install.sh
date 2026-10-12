@@ -4,6 +4,9 @@ set -Eeuo pipefail
 umask 077
 APP_DIR=/root/jtg-cloud
 LEGACY_DIR=/opt/jtg-cloud
+LEGACY_HOME=/home/jtgcloud
+LEGACY_RUNTIME=/opt/jtg-cloud-runtime
+MANAGER_FILE=/root/jtg-cloud-manager.sh
 REPO_URL=https://github.com/JishnuTheGamer/jtg-cloud.git
 REPO_BRANCH=jtg-studio
 SOURCE_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)
@@ -223,6 +226,7 @@ delete_managed_process() {
 }
 legacy_pm2_exists() { [[ -S /home/jtgcloud/.pm2/rpc.sock || -f /home/jtgcloud/.pm2/dump.pm2 ]]; }
 retire_legacy_pm2() {
+  LEGACY_PM2_SHARED=0
   legacy_pm2_exists || return 0
   delete_managed_process /home/jtgcloud/.pm2
   # This startup belongs to the previous service account; keep it if other apps use it.
@@ -233,15 +237,55 @@ retire_legacy_pm2() {
       systemctl daemon-reload
     fi
     PM2_HOME=/home/jtgcloud/.pm2 pm2 kill
+  else
+    LEGACY_PM2_SHARED=1
   fi
+}
+validate_removal_path() {
+  local target=$1 parent
+  case "$target" in /root/jtg-cloud|/opt/jtg-cloud|/home/jtgcloud|/opt/jtg-cloud-runtime|/root/jtg-cloud-manager.sh) ;; *) die 'Refusing an unexpected removal path.';; esac
+  [[ -e "$target" || -L "$target" ]] || return 0
+  parent=$(dirname -- "$target")
+  [[ "$(realpath -e -- "$parent")" == "$parent" ]] || die 'The removal parent redirects outside the managed path.'
+  # A link at the exact named target is only unlinked, never followed.
+  if [[ -e "$target" && ! -L "$target" ]]; then
+    [[ "$(realpath -e -- "$target")" == "$target" ]] || die 'Unsafe resolved removal path.'
+    if command -v findmnt >/dev/null; then
+      local mount mounts
+      mounts=$(findmnt --raw --noheadings --output TARGET) || die 'Could not check filesystem mounts before uninstall.'
+      while IFS= read -r mount; do
+        [[ "$mount" != "$target" && "$mount" != "$target/"* ]] || die "Unmount $mount before removing JTG Cloud."
+      done <<< "$mounts"
+    fi
+  fi
+}
+remove_managed_path() {
+  local target=$1
+  validate_removal_path "$target"
+  [[ -e "$target" || -L "$target" ]] || return 0
+  rm -rf --one-file-system -- "$target" || die "Could not remove $target. Check permissions/mounts and run Uninstall again."
+  [[ ! -e "$target" && ! -L "$target" ]] || die "Could not completely remove $target. Check permissions/mounts and run Uninstall again."
+  success "Removed $target"
+}
+cleanup_pm2_files() {
+  local folder file name
+  for folder in /root/.pm2/logs /root/.pm2/pids; do
+    [[ -d "$folder" && "$(realpath -e -- "$folder")" == "$folder" ]] || continue
+    for file in "$folder"/jtg-cloud-*; do
+      name=${file##*/}
+      if [[ "$name" =~ ^jtg-cloud-(out|error)(-[0-9]+)?\.log$ || "$name" =~ ^jtg-cloud-[0-9]+\.pid$ ]]; then rm -f -- "$file"; fi
+    done
+  done
 }
 health() {
   local attempt
   for attempt in {1..30}; do
-    if curl --fail --silent http://127.0.0.1:6969/api/health | node -e 'try {const body=JSON.parse(require("node:fs").readFileSync(0,"utf8"));process.exit(body.status==="ok"&&body.version===require("./package.json").version?0:1)} catch {process.exit(1)}'; then return 0; fi
+    if curl --noproxy '*' --connect-timeout 2 --max-time 3 --fail --silent http://127.0.0.1:6969/api/health | node -e 'try {const body=JSON.parse(require("node:fs").readFileSync(0,"utf8"));process.exit(body.status==="ok"&&body.version===require("./package.json").version?0:1)} catch {process.exit(1)}'; then return 0; fi
     sleep 1
   done
   printf 'Health check failed. Run: pm2 logs jtg-cloud --lines 50\n' >&2
+  curl --noproxy '*' --connect-timeout 2 --max-time 3 --silent --show-error http://127.0.0.1:6969/api/health >&2 || true
+  if command -v pm2 >/dev/null; then pm2 logs jtg-cloud --lines 30 --nostream >&2 || true; fi
   return 1
 }
 ensure_owner() {
@@ -366,33 +410,44 @@ backup_project() {
 }
 uninstall_project() {
   require_root
-  local existing=$APP_DIR confirmation
-  [[ ! -e "$APP_DIR" || ! -e "$LEGACY_DIR" ]] || die 'Both installation directories exist. Resolve the duplicate before uninstalling.'
-  if [[ ! -e "$APP_DIR" && -d "$LEGACY_DIR" ]]; then existing=$LEGACY_DIR; fi
+  local confirmation target runtime_shared=0
   if ! command -v pm2 >/dev/null || ! command -v node >/dev/null; then
     export PATH="$PATH:/opt/jtg-cloud-runtime/current/bin:/opt/jtg-cloud-runtime/pm2/bin"
   fi
-  validate_directory "$existing"; cd "$existing"; validate_storage
+  # Uninstall must also work for empty/partial folders without .git, package.json or .env.
+  for target in "$APP_DIR" "$LEGACY_DIR" "$LEGACY_HOME" "$LEGACY_RUNTIME" "$MANAGER_FILE"; do validate_removal_path "$target"; done
   heading 'UNINSTALL JTG CLOUD'
-  note "Permanently removes $existing, including accounts, files, encryption key, .env and backups inside it."
+  note "Permanently removes $APP_DIR and $LEGACY_DIR, including accounts, files, keys and backups inside them."
+  note 'Unused old JTG runtime, service home, manager script and cloud logs are also removed.'
   note 'Copy any backup you need outside this directory first.'
   note 'Global Node.js, PM2 and other PM2 applications remain installed.'
-  read -r -p '  Type UNINSTALL JTG CLOUD to confirm: ' confirmation || return 0
-  [[ "${confirmation%$'\r'}" == 'UNINSTALL JTG CLOUD' ]] || { note 'Uninstall cancelled. Nothing removed.'; return 0; }
-  if command -v pm2 >/dev/null; then
+  read -r -p '  Delete JTG Cloud and all its stored data? [y/N]: ' confirmation || return 0
+  case "${confirmation%$'\r'}" in y|Y|yes|YES|Yes) ;; *) note 'Uninstall cancelled. Nothing removed.'; return 0;; esac
+  LEGACY_PM2_SHARED=0
+  if command -v pm2 >/dev/null && command -v node >/dev/null; then
     # Check both names before mutating either process list.
     process_state "$PM2_HOME" >/dev/null
     if legacy_pm2_exists; then process_state /home/jtgcloud/.pm2 >/dev/null; fi
     delete_managed_process "$PM2_HOME"; retire_legacy_pm2
+    # A running daemon may still load the old runtime's process-container code.
+    # Retain it when other apps remain; kill an empty daemon before deleting its old files.
+    if pm2 jlist | node --input-type=module -e 'import fs from "node:fs";process.exit(JSON.parse(fs.readFileSync(0,"utf8")).length?1:0)'; then pm2 kill;
+    else runtime_shared=1; fi
   elif [[ -S /root/.pm2/rpc.sock ]] || legacy_pm2_exists; then
     die 'Cannot safely remove a running PM2 installation. Install global PM2 or choose Repair first.'
   fi
-  validate_directory "$existing"
   cd /root
-  rm -rf --one-file-system -- "$existing"
-  [[ ! -e "$existing" ]] || die 'A mounted directory could not be removed. Unmount it before retrying.'
-  rm -f -- /root/.pm2/logs/jtg-cloud-out.log /root/.pm2/logs/jtg-cloud-error.log "$LOG_FILE"
-  success "JTG Cloud uninstalled. $existing removed completely."
+  remove_managed_path "$APP_DIR"
+  remove_managed_path "$LEGACY_DIR"
+  if command -v pgrep >/dev/null && id -u jtgcloud >/dev/null 2>&1 && pgrep -u jtgcloud >/dev/null; then LEGACY_PM2_SHARED=1; fi
+  if [[ "$LEGACY_PM2_SHARED" == 0 ]]; then remove_managed_path "$LEGACY_HOME";
+  elif [[ -e "$LEGACY_HOME" || -L "$LEGACY_HOME" ]]; then note 'The old service home is used by another running service and was preserved.'; fi
+  if [[ "$LEGACY_PM2_SHARED" == 0 && "$runtime_shared" == 0 ]]; then remove_managed_path "$LEGACY_RUNTIME";
+  elif [[ -e "$LEGACY_RUNTIME" || -L "$LEGACY_RUNTIME" ]]; then note 'Other PM2 apps remain; their potentially shared old runtime was preserved.'; fi
+  remove_managed_path "$MANAGER_FILE"
+  cleanup_pm2_files
+  rm -f -- "$LOG_FILE"
+  success 'JTG Cloud is uninstalled. Choose Install for a fresh cloud and a new owner account.'
 }
 main() {
   case "${1:-}" in
@@ -418,7 +473,7 @@ main() {
       7) backup_project;;
       8) installation_plan;;
       9) repair_project;;
-      10) uninstall_project; return 0;;
+      10) uninstall_project;;
       0) printf '\n  JTG Studio / See you next time.\n'; return 0;;
       *) note 'Choose one of the menu options.';;
     esac

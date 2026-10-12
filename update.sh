@@ -71,10 +71,12 @@ fi
 health() {
   local i
   for i in {1..30}; do
-    if curl --fail --silent http://127.0.0.1:6969/api/health | node -e 'try {const body=JSON.parse(require("node:fs").readFileSync(0,"utf8"));process.exit(body.status==="ok"&&body.version===require("./package.json").version?0:1)} catch {process.exit(1)}'; then return 0; fi
+    if curl --noproxy '*' --connect-timeout 2 --max-time 3 --fail --silent http://127.0.0.1:6969/api/health | node -e 'try {const body=JSON.parse(require("node:fs").readFileSync(0,"utf8"));process.exit(body.status==="ok"&&body.version===require("./package.json").version?0:1)} catch {process.exit(1)}'; then return 0; fi
     sleep 1
   done
   printf 'Health failed. Inspect: pm2 logs jtg-cloud --lines 50\n' >&2
+  curl --noproxy '*' --connect-timeout 2 --max-time 3 --silent --show-error http://127.0.0.1:6969/api/health >&2 || true
+  pm2 logs jtg-cloud --lines 30 --nostream >&2 || true
   return 1
 }
 pm2 ping >/dev/null

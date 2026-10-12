@@ -1,16 +1,60 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, statfs, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, statfs, readFile, writeFile } from 'node:fs/promises';
+import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
-import { config, serviceUrls, GiB, MiB } from '../src/config.mjs';
+import { config, serviceUrls, GiB, MiB, ROOT } from '../src/config.mjs';
 import { openStore, settings } from '../src/database.mjs';
 import { createApp } from '../src/server.mjs';
 import { hashPassword } from '../src/security.mjs';
 import { fingerprintDigest } from '../public/fingerprint.js';
+
+test('PM2 Linux-style ESM wrapper starts an HTTP listener despite a different argv entry',async()=>{
+  const directory=await mkdtemp(path.join(os.tmpdir(),'jtg-pm2-wrapper-'));
+  let child, output='';
+  try {
+    const wrapper=path.join(directory,'ProcessContainerFork.cjs');
+    await writeFile(wrapper,`
+      const http=require('node:http'),{pathToFileURL}=require('node:url');
+      const listen=http.Server.prototype.listen;
+      http.Server.prototype.listen=function(...args){this.once('listening',()=>process.send({port:this.address().port}));return listen.apply(this,args);};
+      setInterval(()=>{},1000);
+      import(pathToFileURL(process.env.pm_exec_path).href).catch(error=>{console.error(error);process.exit(1)});
+    `);
+    child=spawn(process.execPath,[wrapper],{cwd:ROOT,env:{...process.env,pm_exec_path:path.join(ROOT,'src/server.mjs'),PORT:'0',HOST:'127.0.0.1',APP_URL:'',NODE_ENV:'production',COOKIE_SECURE:'false',TRUST_PROXY:'false',DATA_DIR:path.join(directory,'data'),BACKUP_DIR:path.join(directory,'backups')},stdio:['ignore','pipe','pipe','ipc']});
+    child.stdout.on('data',chunk=>{output+=chunk;});child.stderr.on('data',chunk=>{output+=chunk;});
+    const port=await new Promise((resolve,reject)=>{
+      const timeout=setTimeout(()=>reject(new Error(`PM2 wrapper did not start listening: ${output}`)),5000);
+      child.once('message',message=>{clearTimeout(timeout);resolve(message.port);});
+      child.once('error',error=>{clearTimeout(timeout);reject(error);});
+      child.once('exit',code=>{clearTimeout(timeout);reject(new Error(`Wrapper exited ${code}: ${output}`));});
+    });
+    const response=await fetch(`http://127.0.0.1:${port}/api/health`);
+    assert.equal(response.status,200);
+    const body=await response.json();assert.equal(body.status,'ok');
+    assert.equal(body.version,JSON.parse(await readFile(path.join(ROOT,'package.json'),'utf8')).version);
+    assert.equal((await readFile(path.join(directory,'data/encryption.key'))).length,32);
+  } finally {
+    if(child?.pid&&child.exitCode===null&&child.signalCode===null){const closed=new Promise(resolve=>child.once('close',resolve));child.kill('SIGTERM');await closed;}
+    await rm(directory,{recursive:true,force:true});
+  }
+});
+
+test('PM2 config takes explicit .env values instead of retaining a previous port or origin',async()=>{
+  const directory=await mkdtemp(path.join(os.tmpdir(),'jtg-pm2-env-'));
+  try {
+    const filename=path.join(directory,'ecosystem.config.cjs');
+    await writeFile(filename,await readFile(path.join(ROOT,'ecosystem.config.cjs')));
+    await writeFile(path.join(directory,'.env'),'PORT=6969\nHOST=0.0.0.0\nAPP_URL=\nTRUST_PROXY=false\nCOOKIE_SECURE=false\nDATA_DIR="./private-data"\nBACKUP_DIR=./private-backups\nREGISTRATION_DOMAIN=\n');
+    const result=spawnSync(process.execPath,['-e','console.log(JSON.stringify(require(process.argv[1]).apps[0].env))',filename],{encoding:'utf8',env:{...process.env,PORT:'6696',HOST:'127.0.0.1',APP_URL:'https://previous.example',COOKIE_SECURE:'true',TRUST_PROXY:'true',DATA_DIR:'../old-data'}});
+    assert.equal(result.status,0,result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout),{NODE_ENV:'production',PORT:'6969',HOST:'0.0.0.0',APP_URL:'',TRUST_PROXY:'false',COOKIE_SECURE:'false',DATA_DIR:'./private-data',BACKUP_DIR:'./private-backups',REGISTRATION_DOMAIN:''});
+  } finally {await rm(directory,{recursive:true,force:true});}
+});
 
 test('resume lookup remains stable on HTTP IP pages without SubtleCrypto',async()=>{
   const bytes=new TextEncoder().encode('hello');
