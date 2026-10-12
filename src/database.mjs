@@ -81,9 +81,15 @@ export function openStore(dataDir) {
   }
   const defaults = {
     siteName: 'JTG Cloud', tagline: 'Your files. Your cloud.', registrationEnabled: true,
-    defaultQuota: 5 * GiB, maxUpload: 512 * MiB, uploadChunkSize: 20 * MiB, accent: '#7367f0', logo: '', favicon: ''
+    defaultQuota: 5 * GiB, maxUpload: 0, uploadChunkSize: 20 * MiB, accent: '#7367f0', logo: '', favicon: ''
   };
   for (const [name, value] of Object.entries(defaults)) db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run(name, JSON.stringify(value));
+  if (db.prepare('PRAGMA user_version').get().user_version < 2) {
+    transaction(db, () => {
+      db.prepare("UPDATE settings SET value='0' WHERE key='maxUpload'").run();
+      db.exec('PRAGMA user_version = 2');
+    });
+  }
   try { chmodSync(path.join(dataDir, 'cloud.sqlite'), 0o600); chmodSync(keyPath, 0o600); } catch { /* Windows uses ACLs. */ }
   return { db, key, dataDir };
 }

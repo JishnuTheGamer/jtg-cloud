@@ -42,7 +42,7 @@ banner() {
   note "Repository  $REPO_URL"
   note "Branch      $REPO_BRANCH"
   note "Directory   $APP_DIR"
-  note 'App port    6696'
+  note 'App port    6969'
   if [[ -f "$APP_DIR/.env" ]]; then success 'Installed'; else note 'Status      Ready for a new installation'; fi
 }
 installation_plan() {
@@ -54,12 +54,12 @@ installation_plan() {
   step 2 'Install Node.js LTS and PM2'; note 'Latest supported LTS (24+), verified SHA-256, isolated runtime.'
   step 3 'Clone JTG Cloud and enter the project directory'
   step 4 'Install locked application requirements'; note 'npm ci --omit=dev --ignore-scripts'
-  step 5 'Configure service account and private storage'; note 'Port 6696, restricted environment and data permissions.'
+  step 5 'Configure service account and private storage'; note 'Port 6969, restricted environment and data permissions.'
   step 6 'Create the owner account'; note 'Username, email and a password entered privately.'
-  step 7 'Configure HTTPS'; note "Nginx + Let's Encrypt, or your existing HTTPS reverse proxy."
+  step 7 'Show service addresses'; note 'Localhost and IPv4 addresses already assigned to the server.'
   step 8 'Start JTG Cloud with PM2'
   step 9 'Enable automatic startup after reboot'
-  step 10 'Verify cloud health'; note 'Open your HTTPS domain and sign in.'
+  step 10 'Verify cloud health'; note 'Open http://localhost:6969 or http://SERVER_IPV4:6969 and sign in.'
   printf '\n'
 }
 clone_project() {
@@ -75,7 +75,7 @@ clone_project() {
     *)
       note "Cloning $REPO_URL"
       if ! run_command git clone --branch "$REPO_BRANCH" -- "$REPO_URL" "$APP_DIR"; then
-        printf 'This repository requires GitHub access while private. Authenticate Git first, then use the README installation commands.\n' >&2
+        printf 'Repository download failed. Check network access and the README installation commands.\n' >&2
         return 1
       fi
       ;;
@@ -91,7 +91,7 @@ as_cloud() { runuser -u "$SERVICE_USER" -- env PATH="$PATH" PM2_HOME="/home/$SER
 health() {
   local attempt
   for attempt in {1..30}; do
-    if curl --fail --silent http://127.0.0.1:6696/api/health >/dev/null; then return 0; fi
+    if curl --fail --silent http://127.0.0.1:6969/api/health >/dev/null; then return 0; fi
     sleep 1
   done
   printf 'The health check failed. Inspect logs: %s logs jtg-cloud\n' "$PM2" >&2
@@ -137,22 +137,9 @@ install_project() {
   case "$ID" in ubuntu|debian) ;; *) die 'This installer supports Ubuntu and Debian. See README for manual installation.';; esac
   case "$(uname -m)" in x86_64|aarch64|arm64) ;; *) die 'Only x86_64 and ARM64 are supported.';; esac
   command -v systemctl >/dev/null || die 'A systemd-based VPS is required.'
-  local domain email='' proxy
   heading 'NEW CLOUD SETUP'
   note "Source: $REPO_URL"
-  note 'Private repository access must be configured before cloning.'
-  read -r -p 'Cloud domain (e.g. cloud.example.com, DNS must point to this VPS): ' domain
-  [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,63}$ ]] || die 'Enter a valid domain name.'
-  domain=${domain,,}
-  printf 'HTTPS options:\n  1) Install Nginx and obtain a Let’s Encrypt certificate\n  2) I already have an HTTPS reverse proxy\n'
-  read -r -p 'Choose [1]: ' proxy; proxy=${proxy:-1}
-  [[ "$proxy" == 1 || "$proxy" == 2 ]] || die 'Invalid HTTPS option.'
-  if [[ "$proxy" == 1 ]]; then
-    [[ ! -e /etc/nginx/sites-available/jtg-cloud && ! -e /etc/nginx/sites-enabled/jtg-cloud && ! -L /etc/nginx/sites-enabled/jtg-cloud ]] || die 'An Nginx jtg-cloud configuration already exists. Review it manually.'
-    read -r -p 'Email for certificate renewal notices: ' email
-    [[ "$email" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || die 'Invalid certificate email.'
-    printf 'Ports 80/443 must be reachable and the domain DNS must point here. Existing Nginx sites are preserved.\n'
-  fi
+  note 'Service: port 6969 on localhost and available IPv4 addresses.'
   touch "$LOG_FILE"; chmod 600 "$LOG_FILE"
   trap 'install_error "$?" "$LINENO"' ERR
   printf '\nJTG Studio / JTG Cloud install / %s\n' "$(date -u +%FT%TZ)" >>"$LOG_FILE"
@@ -170,12 +157,13 @@ install_project() {
   step 5 'Configure service account and private storage'
   id -u "$SERVICE_USER" >/dev/null 2>&1 || useradd --system --user-group --create-home --home-dir "/home/$SERVICE_USER" --shell /usr/sbin/nologin "$SERVICE_USER"
   cat > .env <<ENV
-PORT=6696
-HOST=127.0.0.1
+PORT=6969
+HOST=0.0.0.0
 NODE_ENV=production
-APP_URL=https://$domain
-TRUST_PROXY=true
-COOKIE_SECURE=true
+APP_URL=
+TRUST_PROXY=false
+COOKIE_SECURE=false
+JTG_NETWORK_MODE=direct-v1
 DATA_DIR=./data
 BACKUP_DIR=./backups
 REGISTRATION_DOMAIN=
@@ -187,44 +175,13 @@ ENV
   chmod 700 data backups
   chown "root:$SERVICE_USER" .env
   chmod 640 .env
-  success 'Port 6696 and storage permissions configured'
+  success 'Port 6969 and storage permissions configured'
   step 6 'Create the owner account'
   note 'The password prompt is private; owner credentials are never written to the installer log.'
   as_cloud node --env-file=.env src/cli.mjs setup
   success 'Owner account created'
-  step 7 'Configure HTTPS'
-  if [[ "$proxy" == 1 ]]; then
-    run_command apt-get install -y nginx certbot python3-certbot-nginx
-    cat > /etc/nginx/sites-available/jtg-cloud <<NGINX
-server {
-    listen 80;
-    server_name $domain;
-    # Browser uploads use configurable chunks, default 20 MiB per request.
-    client_max_body_size 10G;
-    client_body_timeout 900s;
-    location / {
-        proxy_pass http://127.0.0.1:6696;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$remote_addr;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_request_buffering off;
-        proxy_buffering off;
-        proxy_read_timeout 1800s;
-        proxy_send_timeout 1800s;
-    }
-}
-NGINX
-    ln -s /etc/nginx/sites-available/jtg-cloud /etc/nginx/sites-enabled/jtg-cloud
-    nginx -t
-    systemctl enable --now nginx
-    systemctl reload nginx
-    certbot --nginx -d "$domain" --email "$email" --agree-tos --non-interactive --redirect
-    success 'HTTPS certificate and Nginx configured'
-  else
-    note "Use your existing proxy to forward https://$domain to 127.0.0.1:6696."
-  fi
+  step 7 'Show service addresses'
+  node --env-file=.env --input-type=module -e "import {serviceUrls} from './src/config.mjs'; console.log(serviceUrls(6969).join('\n'))"
   step 8 'Start JTG Cloud with PM2'
   as_cloud "$PM2" start ecosystem.config.cjs
   as_cloud "$PM2" save
@@ -235,8 +192,8 @@ NGINX
   health
   trap - ERR
   heading 'INSTALLATION COMPLETE'
-  success "JTG Cloud is ready at https://$domain"
-  note 'App port: 6696 / Public access: HTTPS 443'
+  success 'JTG Cloud is ready on port 6969'
+  note 'Open http://localhost:6969 or http://SERVER_IPV4:6969.'
   note 'Sign in with the owner account you just created.'
   note "Installation log: $LOG_FILE"
 }

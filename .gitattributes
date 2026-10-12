@@ -7,3 +7,5 @@
 *.css text eol=lf
 *.conf.example text eol=lf
 .gitattributes text eol=lf
+*.cjs text eol=lf
+.env.example text eol=lf

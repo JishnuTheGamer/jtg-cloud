@@ -14,7 +14,7 @@ test('JTG Cloud authentication, isolation, storage, permissions and recovery', a
   const dataDir=path.join(temp,'data');
   const ownerInput={username:'cloudowner',email:'owner@example.com',displayName:'Cloud Owner',password:'A long owner passphrase!'};
   let app;
-  const cli=(command,input,extra=[])=>spawnSync(process.execPath,['src/cli.mjs',command,'--stdin',...extra],{cwd:ROOT,input:JSON.stringify(input),encoding:'utf8',env:{...process.env,DATA_DIR:dataDir,BACKUP_DIR:path.join(temp,'backups'),NODE_ENV:'development',APP_URL:'http://localhost:6696'}});
+  const cli=(command,input,extra=[])=>spawnSync(process.execPath,['src/cli.mjs',command,'--stdin',...extra],{cwd:ROOT,input:JSON.stringify(input),encoding:'utf8',env:{...process.env,DATA_DIR:dataDir,BACKUP_DIR:path.join(temp,'backups'),NODE_ENV:'development',APP_URL:'http://localhost:6969'}});
   try {
     await t.test('terminal setup creates exactly one owner and no default credentials',()=>{
       const result=cli('setup',ownerInput);assert.equal(result.status,0,result.stderr);assert.ok(!result.stdout.includes(ownerInput.password));
@@ -189,8 +189,9 @@ test('JTG Cloud authentication, isolation, storage, permissions and recovery', a
       assert.throws(()=>openStore(dataDir),/Missing encryption.key/);
       await assert.rejects(readFile(path.join(dataDir,'encryption.key')),error=>error.code==='ENOENT');
     });
-    await t.test('production rejects plaintext public origins',async()=>{
-      await assert.rejects(createApp({dataDir:path.join(temp,'unsafe'),production:true,appUrl:'http://example.com'}),/HTTPS/);
+    await t.test('production supports direct HTTP service without a domain',async()=>{
+      const direct=await createApp({dataDir:path.join(temp,'direct'),production:true,appUrl:'http://localhost:6969'});
+      try { assert.equal(direct.cfg.secureCookie,false); } finally { await direct.close(); }
     });
   } finally {if(app)await app.close();await rm(temp,{recursive:true,force:true});}
 });

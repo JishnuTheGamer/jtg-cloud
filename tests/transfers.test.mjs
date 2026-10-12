@@ -24,7 +24,7 @@ test('chunked uploads preserve bytes, reservations, isolation and resumable down
   const cli = command => spawnSync(process.execPath, ['src/cli.mjs', command, '--stdin'], {
     cwd: ROOT, encoding: 'utf8',
     input: JSON.stringify({ username: 'transferowner', email: 'transferowner@example.com', displayName: 'Transfer Owner', password: memberPassword }),
-    env: { ...process.env, DATA_DIR: dataDir, BACKUP_DIR: backups, NODE_ENV: 'development', APP_URL: 'http://localhost:6696' }
+    env: { ...process.env, DATA_DIR: dataDir, BACKUP_DIR: backups, NODE_ENV: 'development', APP_URL: 'http://localhost:6969' }
   });
   const start = async directory => {
     app = await createApp({ dataDir: directory, port: 0, production: false, secureCookie: false, appUrl: 'http://127.0.0.1' });

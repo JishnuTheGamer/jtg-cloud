@@ -4,7 +4,7 @@ import { open, rename, unlink, readdir, statfs } from 'node:fs/promises';
 import { randomUUID, randomBytes, createCipheriv, createDecipheriv, createHash } from 'node:crypto';
 import { Transform, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { MiB, GiB } from './config.mjs';
+import { MiB } from './config.mjs';
 import { settings, usage, transaction } from './database.mjs';
 import { fail, HttpError, integer, entryName } from './security.mjs';
 
@@ -114,7 +114,7 @@ export function createTransfers({ db, key, dataDir, activeUploads, parent, image
     await cleanup();
     const name = entryName(input.name),parentId = input.parentId === undefined || input.parentId === '' ? null : input.parentId;
     if (parentId !== null && typeof parentId !== 'string') fail(400,'Invalid folder.');
-    const size = integer(input.size,0,10 * GiB,'File size');
+    const size = integer(input.size,0,Number.MAX_SAFE_INTEGER,'File size');
     if ('clientId' in input && (typeof input.clientId !== 'string' || !CLIENT_UUID.test(input.clientId))) fail(400,'The upload client ID must be a UUID.');
     const id = input.clientId ? input.clientId.toLowerCase() : randomUUID();
     function replay() {
@@ -132,7 +132,7 @@ export function createTransfers({ db, key, dataDir, activeUploads, parent, image
     if (previous) return previous;
     if (activeUploads.has(userId)) fail(409, 'Another upload is in progress for your account.');
     parent(userId,parentId);
-    if (size > settings(db).maxUpload) fail(413,'This file exceeds the upload limit.');
+    if (settings(db).maxUpload > 0 && size > settings(db).maxUpload) fail(413,'This file exceeds the upload limit.');
     return reserveDisk(size,() => transaction(db, () => {
       const previous = replay();
       if (previous) return previous;
@@ -140,7 +140,7 @@ export function createTransfers({ db, key, dataDir, activeUploads, parent, image
       const user = db.prepare('SELECT * FROM users WHERE id=? AND active=1').get(userId);
       if (!user) fail(401, 'This account is no longer active.');
       parent(userId, parentId);
-      if (size > settings(db).maxUpload) fail(413, 'This file exceeds the upload limit.');
+      if (settings(db).maxUpload > 0 && size > settings(db).maxUpload) fail(413, 'This file exceeds the upload limit.');
       if (db.prepare('SELECT COUNT(*) AS count FROM upload_sessions WHERE user_id=? AND state=?').get(userId, 'pending').count >= 20) fail(429, 'Finish or cancel an existing upload before starting another.');
       if (reservedName(db, userId, parentId, name) || db.prepare('SELECT id FROM entries WHERE user_id=? AND parent_id IS ? AND name=? AND deleted_at IS NULL').get(userId, parentId, name)) fail(409, 'A file or upload with that name already exists.');
       if (usage(db, userId) + reservedUploads(db, userId) + size > user.quota) fail(413, 'Not enough storage. Cancel paused uploads, empty trash or ask an administrator for more space.');

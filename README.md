@@ -1,68 +1,49 @@
 # JTG Cloud
 
-Your files. Your server. A responsive, self-hosted cloud storage panel running on **Node.js 24+**, **SQLite**, and **port 6696**, with no third-party application dependencies.
+Your files. Your server. A responsive storage panel by **JTG Studio**, running on **Node.js 24+**, **SQLite** and **port 6969**, with no third-party application dependencies.
 
-## What works
+## Features
 
-- Email or username + password sign-in, registration, persistent sessions, and password changes.
-- One protected **owner**, **administrators**, and **members**, enforced by the server.
-- File and folder uploads, multiple files, drag and drop, nested folders, search, rename, move, starred items, image previews, and downloads.
-- Resumable encrypted uploads using **20 MB chunks by default**, owner-configurable from **1 to 80 MB**, with progress, retry, pause and cancellation.
-- Trash, recursive restore, permanent deletion, and storage accounting that includes trash.
-- Default **5 GB** for new accounts, adjustable per account; owner can change the new-account default or close registration.
-- Owner settings for site name, tagline, logo, favicon, accent color, and upload limits.
-- Administrator member management, owner-only audit log, suspension, and session revocation.
-- AES-256-GCM encryption at rest, scrypt password hashing, hashed server-side session tokens, HttpOnly cookies, CSRF checks, request limits, and account-scoped file access.
-- Interactive `install.sh`, backup and recovery commands, PM2 startup, optional Nginx + Let’s Encrypt setup, and `update.sh` with a pre-update backup and source rollback.
-- Premium light, dark and system themes with a saved browser preference, responsive desktop/mobile layouts, keyboard focus, reduced-motion support and subtle animations.
+- Username or email + password login, registration, persistent sessions and password changes.
+- One protected owner, administrators and members, enforced by the server.
+- File/folder uploads, drag and drop, nested folders, search, rename, move, favorites, image previews and downloads.
+- Unlimited per-file upload size by default, within the account quota and available server disk space.
+- Default **20 MB upload parts**, owner-configurable from **1 to 80 MB**, with progress, retries, pause, cancellation and resume.
+- Secure streaming downloads with HTTP byte-range support for resumable downloads, including older encrypted files.
+- Trash, restore, permanent deletion and storage accounting that includes trash.
+- New members receive **5 GB** by default; the owner can change registration, quotas, branding, logo, favicon and accent color.
+- Premium light/dark/system themes, animations, mobile layouts and reduced-motion support.
+- AES-256-GCM encrypted storage, scrypt passwords, hashed server-side sessions, HttpOnly cookies, origin/CSRF checks and request limits.
+- Interactive installer, PM2 reboot startup, backups, account recovery and a tested updater.
 
-**Google sign-in is a disabled “Coming soon” option.** Firebase/OAuth is intentionally not configured in this version. Email addresses are account identifiers; SMTP verification and emailed password recovery are not implemented. Forgot-password recovery is performed by the server operator through the CLI.
+**Google login is a disabled “Coming soon” option.** Firebase/OAuth, email verification and emailed recovery are not configured. The operator resets forgotten passwords through the CLI.
 
-## Roles
+## Repository
 
-| Action | Owner | Admin | Member |
-| --- | --- | --- | --- |
-| Manage own private files | Yes | Yes | Yes |
-| Create/manage member accounts and quotas | Yes | Yes | No |
-| Appoint, demote or manage administrators | Yes | No | No |
-| Create another owner / delete the owner | No | No | No |
-| Change branding, registration or default quota | Yes | No | No |
-| View audit events | Yes | No | No |
-| Read someone else’s files through the panel | No | No | No |
+The source is **public** at [JishnuTheGamer/jtg-cloud](https://github.com/JishnuTheGamer/jtg-cloud), on branch **`jtg-studio`**. Keep `.env`, `data/`, `backups/` and credentials out of Git.
 
-The installer creates the **one initial owner** in the VPS terminal. Registration always creates members. The database also enforces one owner; no web endpoint can create owners. The owner starts with 50 GB and can adjust their own allowance in Members; new members start with 5 GB. Admins can manage members only, including suspension, deletion and storage limits. Deleting a user permanently deletes their files, so the UI requires confirmation. Users can change their own password under their account menu.
+## Local startup
 
-## Local development
-
-Install [Node.js LTS](https://nodejs.org/en/download) (24 or newer), then open a terminal in this folder:
+Install Node.js 24 or newer, then:
 
 ```sh
+git clone https://github.com/JishnuTheGamer/jtg-cloud.git
+cd jtg-cloud
 npm ci
 cp .env.example .env
 npm run setup
 npm start
 ```
 
-On PowerShell use `Copy-Item .env.example .env`. On Windows, the project also works without `.env` using the defaults. Open **http://localhost:6696**. Enter the owner details during setup; there are no default passwords and no public owner setup route. An account password must be 12–128 characters. `npm run dev` restarts the app when source changes.
+On PowerShell use `Copy-Item .env.example .env`. Open **http://localhost:6969**, or **http://SERVER_IPV4:6969** using an IPv4 address assigned to the server. The app binds to `0.0.0.0:6969` and prints available addresses at startup. Remote access requires your network/firewall to permit that port; the installer does not change firewall rules.
 
-Run validation:
+Create the one owner account during terminal setup. There is no default password or web owner-creation endpoint. Passwords must have 12–128 characters. `npm run dev` restarts the service when source changes.
 
-```sh
-npm run check
-npm test
-```
+The service runs directly over HTTP. `APP_URL` is blank by default, so localhost and IP access work without a hostname setup. It checks the request's own origin and service port, rejects arbitrary DNS hostnames in this mode, and retains authenticated-route CSRF protection. Cookies work on direct HTTP and remain HttpOnly/SameSite. `TRUST_PROXY` is false by default.
 
-The integration tests use temporary storage and verify authentication, CSRF, account isolation, encryption/downloads, quotas, concurrent uploads, folder cycles, trash/restore, role boundaries, suspension, password recovery, restarts and rate limits.
+## VPS installer
 
-## Repository
-
-JTG Cloud is maintained by **JTG Studio** at [JishnuTheGamer/jtg-cloud](https://github.com/JishnuTheGamer/jtg-cloud), on branch **`jtg-studio`**. The repository remains private until its owner chooses to publish it. The installer uses this repository automatically. Keep `.env`, `data/`, `backups/`, and credentials out of Git.
-
-## Automated VPS installation
-
-Supported: **Debian 12+ / Ubuntu 22.04+**, x86_64 or ARM64, root/sudo access, a domain pointed at the VPS, and free disk space for users’ storage. A small private instance can start with 2 GB RAM; provision disk capacity for actual quotas. The app does not allocate quota-sized disk space in advance.
-
-Clone the repository, enter the **`jtg-cloud`** directory (the `.git` suffix belongs to the repository URL), inspect the installer, then run:
+Supported: **Debian 12+ / Ubuntu 22.04+**, x86_64 or ARM64, systemd, root/sudo access and enough disk for members' storage. If Git is missing, install it with `sudo apt-get update` and `sudo apt-get install -y git`.
 
 ```sh
 git clone https://github.com/JishnuTheGamer/jtg-cloud.git
@@ -71,74 +52,61 @@ bash install.sh --dry-run
 sudo bash install.sh
 ```
 
-While the repository is private, Git must be authenticated before cloning. If Git is missing, install it with `sudo apt-get update` and `sudo apt-get install -y git`. One authentication option is the [GitHub CLI](https://cli.github.com/manual/gh_auth_setup-git): install `gh`, run `gh auth login`, then `gh auth setup-git` as the account doing the clone. Use the credential helper or a read-only deploy key; do not put a token in the repository URL or script. The installer reuses the committed source from this authenticated local checkout and sets the deployment's origin to the GitHub URL. Untracked files, `.env`, data and local credential configuration are not copied. Managed updates run as root, so configure repository read access for that account as well while the repository is private.
+The installer uses the repository URL automatically, installs the current supported Node.js LTS and PM2, clones into `/opt/jtg-cloud`, installs locked requirements, prepares the dedicated `jtgcloud` account, asks for owner details, prints localhost/IPv4 addresses and starts the service on **6969** with systemd reboot startup. Existing system Node installations are not overwritten. Node downloads are checked against the official SHA-256 checksum.
 
-The **JTG Studio** terminal menu uses bold headings, colors when supported, ten installation stages and a completion status. Set `NO_COLOR=1` for plain output. `--dry-run` previews the flow without changing the system. The menu provides install, update, restart, stop, status, account-password reset, backup and installation preview. Installation:
+The installer asks for owner account information only. It configures the Node service directly; network hosting, DNS and certificates are not installed. Source is root-owned, `.env` is restricted and data/backups are private. Package/Git diagnostics go to `/var/log/jtg-cloud-install.log`; owner passwords are entered privately and never sent to this log.
 
-1. Uses the JTG Cloud repository automatically and asks for the HTTPS domain.
-2. Installs Git, curl, Python and xz tools with apt.
-3. Discovers the latest supported **Node.js LTS** from the official Node.js release index, downloads the correct architecture, verifies its SHA-256 checksum, and installs it under `/opt/jtg-cloud-runtime/`. Existing system Node installations are not overwritten.
-4. Installs PM2, clones the app into `/opt/jtg-cloud`, and configures port **6696**.
-5. Runs the app under a dedicated `jtgcloud` system account; source remains root-owned, `.env` is restricted and data directories are private.
-6. Prompts privately for the owner account and password.
-7. Optionally installs Nginx and obtains a Let’s Encrypt certificate. For this option, DNS must already resolve to the VPS and public ports 80/443 must be reachable. Existing Nginx site configurations are preserved.
-8. Starts PM2, saves the process list, configures systemd reboot startup and checks health.
+The bold JTG Studio menu supports install, update, restart, stop, status, password reset, backup and installation preview. Use `NO_COLOR=1` for plain output. A fresh installation refuses to overwrite an existing application directory. If a step fails, inspect the log and repair the failed step without deleting user data.
 
-The app listens on **127.0.0.1:6696**. The public website uses HTTPS on **443**, with Nginx forwarding to 6696. This keeps the unencrypted app port private. If you choose an existing reverse proxy, configure it before opening the cloud. Production refuses an HTTP `APP_URL` and uses secure cookies.
+## Roles and quotas
 
-The installer is intended for a new installation and stops rather than overwriting an existing directory. Package and Git diagnostics are saved to root-readable `/var/log/jtg-cloud-install.log`; owner credentials are entered directly in the terminal and never sent to this log. If installation fails, inspect the error, complete the failed configuration step manually and use the existing source/data. Do not delete `data/` to retry.
+| Action | Owner | Admin | Member |
+| --- | --- | --- | --- |
+| Manage own private files | Yes | Yes | Yes |
+| Create/manage members and their quotas | Yes | Yes | No |
+| Appoint/manage administrators | Yes | No | No |
+| Create a second owner or delete the owner | No | No | No |
+| Change branding, registration or upload settings | Yes | No | No |
+| View audit events | Yes | No | No |
+| Read another account's files in the panel | No | No | No |
 
-## Manual production deployment
+Registration creates members. The initial owner receives 50 GB and can change their allowance; new members receive 5 GB by default. Admins manage members only. Account suspension and permission changes revoke sessions. Users can change their password in account settings.
 
-```sh
-git clone https://github.com/JishnuTheGamer/jtg-cloud.git
-cd jtg-cloud
-npm ci --omit=dev --ignore-scripts
-cp .env.example .env
-# Edit .env before setup:
-# NODE_ENV=production
-# APP_URL=https://cloud.example.com
-# HOST=127.0.0.1
-# COOKIE_SECURE=true
-# TRUST_PROXY=true  (only with a trusted proxy on loopback)
-npm run setup
-npm install -g pm2
-pm2 start ecosystem.config.cjs
-pm2 save
-pm2 startup
-```
+## Uploads and downloads
 
-Run the app as a dedicated unprivileged user, keep source read-only, and permit that user to write only `data/` and `backups/`. Follow the command printed by `pm2 startup` to enable restart after reboot. Use `deploy/nginx.conf.example` as the reverse-proxy configuration, substitute your domain, then configure HTTPS with your certificate provider.
+**File size** and **part size** are separate settings. The default optional file-size limit is **0 = unlimited**. The previous 512 MB/10 GB application caps are removed. An owner may explicitly set an optional cap later, or leave it at 0. Unlimited file size does not bypass account quota, disk capacity or the server's free-space margin.
 
-`TRUST_PROXY=true` trusts `X-Forwarded-For` for rate limiting. Only use it when direct clients cannot reach port 6696, and have the proxy **replace** that header with the actual client address. The supplied Nginx configuration does this. The service must run as **one PM2 fork process**, not cluster mode; storage locks and per-account upload reservations assume one instance.
+The default part is **20 MB** (20 × 1,024² bytes), not a bandwidth speed cap. Set **Cloud settings → Upload part size (MB)** to 1–80. Each upload snapshots its chosen size and sends sequential encrypted parts. Changing the setting affects new transfers.
+
+Pause preserves committed parts for up to 24 hours. To resume after reloading, choose the original unchanged file again and select Resume. Failed acknowledgements safely reuse the upload ID and saved part. Cancel removes unfinished parts and releases the reservation. Browser storage holds only resume metadata, never file contents or passwords.
+
+Downloads stream to the browser without gathering the entire file in JavaScript memory. Byte ranges can resume interrupted downloads. New files authenticate only the requested encrypted parts; legacy files authenticate their whole ciphertext first, which can add startup latency. Quotas, ownership and trash state still apply.
 
 ## Updating
 
-For a managed installation:
+For an installation already using this updater:
 
 ```sh
 sudo bash /opt/jtg-cloud/update.sh
 ```
 
-The updater refuses tracked local modifications and non-fast-forward history. It stops PM2, makes a consistent backup of SQLite + encrypted blobs + key, fast-forwards the source, installs locked dependencies, runs syntax and integration tests, restarts and checks health. On failure it restores the previous tracked source and restarts when the storage format is compatible; otherwise it keeps the cloud stopped for backup recovery. `.env`, data and backups are ignored and preserved. Application rollback alone is not a database rollback. Version 1.1 adds tables for encrypted file parts; version 1.0 cannot read the new format. If downgrading after any chunked uploads, restore the matching complete pre-upgrade backup before starting old source. See [release notes](RELEASE-NOTES.md).
+**One-time upgrade from port 6696:** run the latest updater from the fetched source, so the previous updater does not keep checking the old port:
 
-For a manual installation, stop your PM2 process, run the backup command below, update the source with `git pull --ff-only`, run `npm ci`, `npm run check` and `npm test`, then restart PM2. Review release notes before migrations.
+```sh
+cd /opt/jtg-cloud
+sudo git fetch origin
+sudo git show origin/jtg-studio:update.sh | sudo bash
+```
 
-Node security updates are separate from application updates. The installer chooses the current LTS during initial installation. Periodically update the scoped runtime from official releases, restart PM2 and its startup service with the new executable, and verify health. Runtime and certificate renewal need normal server maintenance.
+The updater stops PM2, saves a consistent database/blob/key backup and a restricted copy of `.env`, fast-forwards source, migrates the previous network settings once to direct port 6969, installs requirements, runs checks and tests, restarts and checks health. User data, quotas and branding remain. The first v1.2 database startup sets the previous per-file cap to unlimited; subsequent restarts preserve explicitly chosen caps.
 
-## Chunked uploads and tunnels
+Tracked local changes and divergent Git history stop the update. A failure restores tracked source and the previous environment. If old source cannot read the storage format, the service remains stopped for backup recovery. Source rollback does not restore the database; retain the full pre-update backup. Before downgrading to v1.0, restore its matching complete backup because it cannot read segmented files.
 
-In owner **Settings**, adjust **Upload chunk size** independently from the **Maximum file size**. The default chunk size is **20 MB** (20 MiB / 20 × 1,024² bytes). This is the size of each HTTP request, not a 20 Mbps speed cap. Each upload snapshots its chunk size when it begins, so changing the setting affects new uploads. The full file still must fit the per-file limit and account quota.
-
-The browser sends sequential chunks and retries a failed request safely. **Pause** retains the upload for up to 24 hours; reselect the same file and choose **Resume** to continue, including after a page reload. **Cancel** discards the unfinished transfer and releases its storage reservation. Keep the original file unchanged when resuming. Browser storage retains only resume metadata, not file contents or account passwords.
-
-[Cloudflare documents a 100 MB request upload limit on Free/Pro](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/4xx-client-error/error-413/) and recommends smaller requests. The supported 1–80 MB chunk setting stays below that size. Other proxies can have smaller configured limits; choose a chunk below the smallest limit in your deployment. Chunking reduces oversized-request failures, but does not remove proxy/network timeouts or outages. For slow connections, lower the chunk size.
-
-Downloads use authenticated streaming links; the browser does not collect the entire file in JavaScript memory. New and legacy files support HTTP byte ranges, allowing compatible browsers/download managers to resume. New files authenticate only the requested encrypted parts; legacy files must authenticate their complete ciphertext before the response starts, which can add latency for large old files. Keep proxy buffering disabled and private responses uncached. The application's account permissions, trash state and encryption still apply to downloads.
+Use one PM2 fork process, not cluster mode: per-account upload locking and reservations assume one service instance. Node security updates are separate from application updates; keep the scoped LTS runtime current.
 
 ## Backups and account recovery
 
-Stop the app before a backup (the CLI refuses a live backup):
+Use installer menu option 7, or stop the service and run:
 
 ```sh
 pm2 stop jtg-cloud
@@ -146,41 +114,27 @@ node --env-file-if-exists=.env src/cli.mjs backup
 pm2 start jtg-cloud
 ```
 
-For managed installs use menu option 7; it runs the command as `jtgcloud` and restarts automatically. Backups are saved under `backups/jtg-cloud-TIMESTAMP-ID/` (or the directory configured with `BACKUP_DIR`). Copy them to a protected off-server location. Keep enough space for the database and all encrypted files.
+Backups contain SQLite, encrypted blobs (including committed upload parts) and the encryption key. Copy them to a protected off-server location. Restore database, `blobs/` and `encryption.key` together into a fresh data directory with private permissions. Do not copy old WAL/SHM/lock files. Preserve `.env` separately. Losing the key makes stored files unreadable; the app refuses to invent a replacement key for an existing database.
 
-To restore: stop PM2, keep a copy of the current data, and restore **`cloud.sqlite`, `blobs/`, and `encryption.key` together** into a fresh `data/` directory. Do not carry old `cloud.sqlite-wal`, `cloud.sqlite-shm`, or `instance.lock` into that directory. Set its owner to the service user and permissions to 700 for directories / 600 for key and database, then restart. Preserve `.env` separately. Losing the encryption key makes stored files unreadable; the server refuses to invent a new key for an existing database.
-
-Reset a forgotten password:
+Recover an account through installer menu option 6, or:
 
 ```sh
 node --env-file-if-exists=.env src/cli.mjs reset-password
 ```
 
-For managed installs use menu option 6. All the account’s sessions are revoked. Noninteractive setup/reset accepts a JSON object on stdin with `--stdin`; pass secrets through a secure input channel, never command-line arguments, logs or committed files.
+Recovery revokes existing sessions. Automation accepts JSON on stdin with `--stdin`; never put passwords in command arguments or committed files.
 
-## Storage and security boundaries
+## Storage boundaries and validation
 
-- The private `data/` directory contains SQLite, encrypted blobs, upload staging and the encryption key. Store it on a protected persistent disk. Do not serve it using Nginx static aliases.
-- Files can have arbitrary extensions, including archives and scripts, because this is private general-purpose storage. They are never executed, unzipped or served as active HTML. Only signature-recognized PNG/JPEG/GIF/WebP files are eligible for same-origin raster preview. Everything else is downloaded as an attachment with `nosniff`.
-- Quota includes files in trash. Uploads are streamed to encrypted staging files, limited per file and by remaining account quota. Paused uploads reserve their full size against account quota; pending bytes also reserve server disk capacity. Concurrent chunk writes for one account are refused to prevent overcommit. Cancellation or expiry releases the reservation. The server retains a free-space margin. Configure reverse-proxy upload timeouts for slow connections.
-- Public uploads are not offered. There is no public sharing endpoint. Administrators cannot browse another member’s files through the panel.
-- Encryption is **server-side encryption at rest**, not end-to-end encryption. Anyone controlling the server or its key can decrypt files. It does not protect against a compromised host. Maintain OS security, TLS, access controls and off-server backups.
-- This project is not an independently audited equivalent of Google Drive. There is no MFA, antivirus scanning, distributed storage, public sharing, email verification or automated SMTP password recovery. Integrate those separately if your deployment requires them.
-- Audit events cover login, account changes, file changes and settings; the latest 10,000 are retained, with 200 visible in the owner panel. Audit metadata is not a tamper-proof external log.
-- Listings are capped at 2,000 items; search narrows larger collections. Large multi-user instances need load testing and a storage/database architecture designed for their scale. Default upload limit is 512 MB, configurable up to 10 GB. The app labels binary units as GB/MB (1 GB = 1,024³ bytes).
+Files of any extension are private downloads; they are not executed or unzipped. Only signature-recognized raster images receive inline previews. Other types are attachments with `nosniff`. Store the private data directory outside any static web root.
 
-The implementation follows relevant [OWASP file upload guidance](https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html): authorized handlers, generated storage names, bounded sizes, CSRF protection, and storage outside the webroot. General-purpose private downloads require additional deployment controls if you allow untrusted public registrations.
+Trash counts toward quota. Pending transfers reserve quota/disk capacity and release reservations on cancellation or expiry. Encryption is server-side storage encryption; someone controlling the host and its key can decrypt files. This release is not independently security audited or load tested. MFA, virus scanning, distributed storage, public sharing, SMTP verification and email recovery are not implemented.
 
-## Project layout
+Listings are limited to 2,000 items per view; search narrows larger collections. Storage labels use binary units: 1 GB = 1,024³ bytes. Audit metadata retains the latest 10,000 events, with the latest 200 visible to the owner.
 
-```text
-src/           HTTP API, SQLite schema, encryption/auth, owner CLI
-public/        Responsive UI, styles and SVG brand mark
-tests/         Integration and security regression tests
-scripts/       Syntax checks
-deploy/        Reverse-proxy example
-install.sh     Interactive VPS / PM2 / HTTPS installer
-update.sh      Backup, tested fast-forward update and source rollback
+```sh
+npm run check
+npm test
 ```
 
-No application packages are downloaded at runtime. SQLite is Node’s built-in `node:sqlite` module. Some Node versions emit an experimental-module warning; this does not indicate a failed startup. Keep the supported LTS runtime current.
+See [VALIDATION.md](VALIDATION.md) for completed checks and deployment limitations, and [release notes](RELEASE-NOTES.md) for upgrade requirements.

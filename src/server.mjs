@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { isIP } from 'node:net';
 import path from 'node:path';
 import { createWriteStream } from 'node:fs';
 import { readFile, rename, unlink, statfs } from 'node:fs/promises';
@@ -6,14 +7,14 @@ import { randomUUID, randomBytes, createCipheriv } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { Transform, Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { config, ROOT, GiB, MiB } from './config.mjs';
+import { config, serviceUrls, ROOT, GiB, MiB } from './config.mjs';
 import { openStore, settings, usage, publicUser, audit, transaction } from './database.mjs';
 import { fail, HttpError, token, digest, hashPassword, verifyPassword, identity, entryName, integer, cookies, rateLimiter } from './security.mjs';
 import { acquireLock } from './lock.mjs';
 import { createTransfers, reservedUploads, reservedName, entryBlobs, deleteBlobs, downloadRange, downloadBytes } from './transfers.mjs';
 
 const SESSION = 'jtg_session';
-const STATIC = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/theme.js': ['theme.js', 'text/javascript; charset=utf-8'], '/styles.css': ['styles.css', 'text/css; charset=utf-8'], '/mark.svg': ['mark.svg', 'image/svg+xml'] };
+const STATIC = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/theme.js': ['theme.js', 'text/javascript; charset=utf-8'], '/fingerprint.js': ['fingerprint.js', 'text/javascript; charset=utf-8'], '/styles.css': ['styles.css', 'text/css; charset=utf-8'], '/mark.svg': ['mark.svg', 'image/svg+xml'] };
 const imageType = bytes => {
   if (bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) return 'image/png';
   if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return 'image/jpeg';
@@ -119,15 +120,24 @@ export async function createApp(overrides = {}) {
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
     res.setHeader('Cache-Control', 'no-store');
-    if (cfg.production) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+    if (cfg.appUrl.startsWith('https:') && cfg.secureCookie) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+    let allowedOrigin = cfg.appUrl;
+    if (!cfg.explicitAppUrl) {
+      let target;
+      try { target = new URL(`http://${req.headers.host}`); } catch { fail(400, 'Invalid service address.'); }
+      const hostname = target.hostname.replace(/^\[|\]$/g, '');
+      const port = server.address()?.port ?? cfg.port;
+      if ((hostname !== 'localhost' && !isIP(hostname)) || Number(target.port || 80) !== port || target.username || target.password || target.pathname !== '/' || target.search || target.hash) fail(400, 'Use localhost or the server IP address with the service port.');
+      allowedOrigin = target.origin;
+    }
     const url = new URL(req.url, cfg.appUrl), route = url.pathname, method = req.method;
     const ip = cfg.trustProxy ? String(req.headers['x-forwarded-for'] || req.socket.remoteAddress).split(',')[0].trim() : req.socket.remoteAddress;
     if (route.startsWith('/api/')) limiter.check(`api:${ip}`, 1200, 60000);
     if (!['GET','HEAD','OPTIONS'].includes(method)) {
-      if (req.headers.origin && req.headers.origin !== cfg.appUrl) fail(403, 'Cross-origin requests are not allowed.');
+      if (req.headers.origin && req.headers.origin !== allowedOrigin) fail(403, 'Cross-origin requests are not allowed.');
       if (req.headers['sec-fetch-site'] === 'cross-site') fail(403, 'Cross-site requests are not allowed.');
     }
-    if (route === '/api/health' && method === 'GET') return json(res, 200, { status: 'ok', version: '1.1.0' });
+    if (route === '/api/health' && method === 'GET') return json(res, 200, { status: 'ok', version: '1.2.0' });
     if (route === '/api/config' && method === 'GET') {
       const s = settings(db);
       return json(res, 200, { siteName: s.siteName, tagline: s.tagline, logo: s.logo, favicon: s.favicon, accent: s.accent, registrationEnabled: s.registrationEnabled, defaultQuota: s.defaultQuota, googleEnabled: false, setupRequired: !db.prepare("SELECT id FROM users WHERE role='owner'").get() });
@@ -225,7 +235,8 @@ export async function createApp(overrides = {}) {
         if (reservedName(db,user.id,parentId,name)) fail(409,'An upload with that name is waiting to complete.');
         const freshUser = db.prepare('SELECT * FROM users WHERE id=?').get(user.id);
         const available = freshUser.quota - usage(db, user.id) - reservedUploads(db,user.id);
-        const max = Math.min(settings(db).maxUpload, available);
+        const fileLimit = settings(db).maxUpload;
+        const max = fileLimit > 0 ? Math.min(fileLimit, available) : available;
         const length = Number(req.headers['content-length']);
         if (!Number.isSafeInteger(length) || length < 0) fail(411, 'A valid Content-Length is required for uploads.');
         if (length > max) fail(413, available < length ? 'Not enough storage. Empty trash or ask an administrator for more space.' : 'This file exceeds the upload limit.');
@@ -236,7 +247,8 @@ export async function createApp(overrides = {}) {
           const currentUser = db.prepare('SELECT * FROM users WHERE id=? AND active=1').get(user.id);
           if (!currentUser) fail(401,'This account is no longer active.');
           if (length + usage(db,user.id) + reservedUploads(db,user.id) > currentUser.quota) fail(413,'Not enough storage. Cancel paused uploads or free some space.');
-          if (length > settings(db).maxUpload) fail(413,'This file exceeds the upload limit.');
+          const limit = settings(db).maxUpload;
+          if (limit > 0 && length > limit) fail(413,'This file exceeds the upload limit.');
           if (reservedName(db,user.id,parentId,name)) fail(409,'An upload with that name is waiting to complete.');
           uploads.set(user.id,true); reservedDisk += length; transfers.diskChanged();
         });
@@ -360,7 +372,7 @@ export async function createApp(overrides = {}) {
           files: db.prepare("SELECT COUNT(*) AS count FROM entries WHERE kind='file'").get().count,
           used: db.prepare('SELECT COALESCE(SUM(size),0) AS bytes FROM entries').get().bytes,
           diskFree: disk.bavail * disk.bsize, diskTotal: disk.blocks * disk.bsize,
-          settings: settings(db), version: '1.1.0', port: cfg.port });
+          settings: settings(db), version: '1.2.0', port: cfg.port });
       }
       if (route === '/api/admin/users' && method === 'GET') {
         staff(user); return json(res, 200, { users: db.prepare('SELECT * FROM users ORDER BY created_at DESC LIMIT 2000').all().map(u => publicUser(db, u)) });
@@ -429,7 +441,7 @@ export async function createApp(overrides = {}) {
         if ('tagline' in input) { if (typeof input.tagline !== 'string' || input.tagline.length > 100) fail(400, 'Tagline is too long.'); update.tagline = input.tagline.trim(); }
         if ('registrationEnabled' in input) { if (typeof input.registrationEnabled !== 'boolean') fail(400, 'Invalid registration setting.'); update.registrationEnabled = input.registrationEnabled; }
         if ('defaultQuota' in input) update.defaultQuota = integer(input.defaultQuota, 0, 100000 * GiB, 'Default quota');
-        if ('maxUpload' in input) update.maxUpload = integer(input.maxUpload, MiB, 10 * GiB, 'Upload limit');
+        if ('maxUpload' in input) update.maxUpload = integer(input.maxUpload, 0, Number.MAX_SAFE_INTEGER, 'Upload limit');
         if ('uploadChunkSize' in input) update.uploadChunkSize = integer(input.uploadChunkSize, MiB, 80 * MiB, 'Upload chunk size');
         if ('accent' in input) { if (!/^#[0-9a-f]{6}$/i.test(input.accent)) fail(400, 'Invalid accent color.'); update.accent = input.accent; }
         if ('logo' in input) update.logo = brandingImage(input.logo);
@@ -476,7 +488,7 @@ export async function createApp(overrides = {}) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const app = await createApp();
-  app.server.listen(app.cfg.port, app.cfg.host, () => console.log(`JTG Cloud is running at ${app.cfg.appUrl} (listening on ${app.cfg.host}:${app.cfg.port})`));
+  app.server.listen(app.cfg.port, app.cfg.host, () => console.log(`JTG Cloud is running on ${app.cfg.host}:${app.cfg.port}\n${serviceUrls(app.cfg.port,app.cfg.host).join('\n')}`));
   app.server.on('error', error => { console.error(error.message); process.exitCode = 1; });
   let stopping = false;
   for (const signal of ['SIGINT','SIGTERM']) process.on(signal, async () => {

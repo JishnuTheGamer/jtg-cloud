@@ -30,6 +30,8 @@ test('installer preview is noninteractive and does not invoke system commands', 
   assert.match(output, /git clone --branch jtg-studio https:\/\/github\.com\/JishnuTheGamer\/jtg-cloud\.git \/opt\/jtg-cloud/);
   assert.match(output, /cd \/opt\/jtg-cloud\n/);
   assert.match(output, /\[10\/10\] Verify cloud health/);
+  assert.match(output, /http:\/\/localhost:6969/);
+  assert.doesNotMatch(output, /Nginx|Certbot|Cloudflare|Configure HTTPS|DNS|6696/);
   assert.doesNotMatch(output, /\x1b\[/);
 });
 
@@ -169,4 +171,28 @@ test('rollback refuses to start version 1.0 against chunked file storage', { ski
     assert.equal(path.dirname(temporary), os.tmpdir());
     rmSync(temporary, { recursive: true, force: true });
   }
+});
+
+test('updater migrates the previous network setup once and preserves unrelated settings', { skip: !available }, () => {
+  const temporary=mkdtempSync(path.join(os.tmpdir(),'jtg-cloud-installer-'));
+  try {
+    shell(['-c', `
+      source ./update.sh
+      APP_DIR="$JTG_TEST_ROOT/application"
+      mkdir -p "$APP_DIR"
+      printf 'PORT=6696\\nHOST=127.0.0.1\\nAPP_URL=https://previous.example\\nTRUST_PROXY=true\\nCOOKIE_SECURE=true\\nDATA_DIR=./kept-data\\nREGISTRATION_DOMAIN=members.example\\n' > "$APP_DIR/.env"
+      configure_service_env
+      grep -qx 'PORT=6969' "$APP_DIR/.env"
+      grep -qx 'HOST=0.0.0.0' "$APP_DIR/.env"
+      grep -qx 'APP_URL=' "$APP_DIR/.env"
+      grep -qx 'COOKIE_SECURE=false' "$APP_DIR/.env"
+      grep -qx 'TRUST_PROXY=false' "$APP_DIR/.env"
+      grep -qx 'DATA_DIR=./kept-data' "$APP_DIR/.env"
+      grep -qx 'REGISTRATION_DOMAIN=members.example' "$APP_DIR/.env"
+      printf 'OPERATOR_CUSTOM_FIELD=keep-me\\n' >> "$APP_DIR/.env"
+      configure_service_env
+      grep -qx 'OPERATOR_CUSTOM_FIELD=keep-me' "$APP_DIR/.env"
+      [[ "$(grep -c '^PORT=' "$APP_DIR/.env")" == 1 ]]
+    `],{JTG_TEST_ROOT:temporary.replaceAll('\\','/')});
+  } finally {assert.equal(path.dirname(temporary),os.tmpdir());rmSync(temporary,{recursive:true,force:true});}
 });

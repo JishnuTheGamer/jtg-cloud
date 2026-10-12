@@ -2,6 +2,22 @@
 # JTG Cloud updater by JTG Studio.
 set -Eeuo pipefail
 umask 027
+configure_service_env() {
+  node --input-type=module - "$APP_DIR" <<'JS'
+import fs from 'node:fs';
+import path from 'node:path';
+const filename = path.join(process.argv[2], '.env');
+let text = fs.readFileSync(filename, 'utf8').replaceAll('\r\n', '\n');
+if (/^JTG_NETWORK_MODE=direct-v1\s*$/m.test(text)) process.exit(0);
+const values = {PORT:'6969',HOST:'0.0.0.0',APP_URL:'',TRUST_PROXY:'false',COOKIE_SECURE:'false',JTG_NETWORK_MODE:'direct-v1'};
+for (const [key, value] of Object.entries(values)) {
+  const expression = new RegExp(`^${key}=.*$`, 'gm');
+  text = expression.test(text) ? text.replace(expression, `${key}=${value}`) : `${text.trimEnd()}\n${key}=${value}\n`;
+}
+fs.writeFileSync(filename,text);
+console.log('Service configured for localhost / IPv4 on port 6969.');
+JS
+}
 previous_restart_safe() {
   node --env-file=.env --input-type=module - "$APP_DIR" <<'JS'
 import fs from 'node:fs';
@@ -51,21 +67,24 @@ else
   printf '\nJTG CLOUD / JTG Studio\nApplication update\n\n'
 fi
 as_cloud() { runuser -u "$SERVICE_USER" -- env PATH="$PATH" PM2_HOME="/home/$SERVICE_USER/.pm2" "$@"; }
-health() { local i; for i in {1..30}; do if curl --fail --silent http://127.0.0.1:6696/api/health >/dev/null; then return 0; fi; sleep 1; done; return 1; }
+health() { local i; for i in {1..30}; do if curl --fail --silent http://127.0.0.1:6969/api/health >/dev/null; then return 0; fi; sleep 1; done; return 1; }
 [[ -z "$(git status --porcelain --untracked-files=no)" ]] || { printf 'Tracked source files have local changes. Save them before updating. Data and .env are ignored and preserved.\n' >&2; exit 1; }
 git fetch --prune origin
 follow_remote_branch
 git merge-base --is-ancestor HEAD "origin/$branch" || { printf 'Update is not a fast-forward. Resolve the branch manually.\n' >&2; exit 1; }
 previous=$(git rev-parse HEAD)
 next=$(git rev-parse "origin/$branch")
-[[ "$previous" != "$next" ]] || { printf 'JTG Cloud is already up to date.\n'; exit 0; }
+if [[ "$previous" == "$next" ]] && grep -qx 'JTG_NETWORK_MODE=direct-v1' .env; then printf 'JTG Cloud is already up to date.\n'; exit 0; fi
 stopped=0
+env_backup=''
 rollback() {
   local error=$?
   trap - ERR
   printf '\nUpdate failed. Restoring the previous application version. Your data backup is retained.\n' >&2
+  if [[ "$stopped" == 1 ]]; then as_cloud "$PM2" stop jtg-cloud || true; fi
   # Only tracked source is reset; ignored data, backups and .env are preserved.
   git reset --hard "$previous" || true
+  if [[ -n "$env_backup" && -f "$env_backup" ]]; then cp -- "$env_backup" .env || true; fi
   npm ci --omit=dev --ignore-scripts || true
   if [[ "$stopped" == 1 ]]; then
     if previous_restart_safe; then
@@ -82,7 +101,12 @@ trap rollback ERR
 as_cloud "$PM2" stop jtg-cloud
 stopped=1
 as_cloud node --env-file=.env src/cli.mjs backup
+mkdir -p "$APP_DIR/backups"
+env_backup=$(mktemp "$APP_DIR/backups/.env-update-XXXXXX")
+chmod 600 "$env_backup"
+cp -- .env "$env_backup"
 git merge --ff-only "origin/$branch"
+configure_service_env
 npm ci --omit=dev --ignore-scripts
 node scripts/check.mjs
 node --test --test-concurrency=1 tests/*.test.mjs
@@ -93,4 +117,4 @@ stopped=0
 trap - ERR
 printf '\nJTG Cloud updated successfully. Data, owner account and encryption key were preserved.\n'
 }
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then main "$@"; fi
