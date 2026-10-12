@@ -43,14 +43,16 @@ The service runs directly over HTTP. `APP_URL` is blank by default, so localhost
 
 ## VPS installer
 
-Supported: **Debian 12+ / Ubuntu 22.04+**, x86_64 or ARM64, systemd, root/sudo access and enough disk for members' storage. If Git is missing, install it with `sudo apt-get update` and `sudo apt-get install -y git`.
+Supported: **Debian 12+ / Ubuntu 22.04+**, x86_64 or ARM64, systemd, root/sudo access and enough disk for members' storage. Run the manager from outside the target project directory; the installer installs Git and clones the project itself.
 
 ```sh
-git clone https://github.com/JishnuTheGamer/jtg-cloud.git
-cd jtg-cloud
-bash install.sh --dry-run
-sudo bash install.sh
+sudo -i
+curl -fsSL https://raw.githubusercontent.com/JishnuTheGamer/jtg-cloud/jtg-studio/install.sh -o /root/jtg-cloud-manager.sh && bash /root/jtg-cloud-manager.sh
 ```
+
+Choose **1** for a new installation, or **9** to repair an existing installation. Preview without installing: `bash /root/jtg-cloud-manager.sh --dry-run`.
+
+Use the **raw.githubusercontent.com** link above. A GitHub `/blob/` link returns an HTML webpage; passing it to Bash causes an error such as `<!DOCTYPE html>` or `syntax error near unexpected token`. Do not clone a setup checkout into `/root/jtg-cloud` first; that directory is the managed installation target.
 
 The installer clones into **`/root/jtg-cloud`**, installs requirements with `npm ci`, asks for owner details and starts the cloud on **6969**. It keeps an existing working Node.js 24+ installation; otherwise it installs the latest supported LTS with verified SHA-256 downloads and makes `node`/`npm` available globally. PM2 uses the standard **`npm install -g pm2`**, available as `pm2` from `/usr/local/bin`.
 
