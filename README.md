@@ -46,7 +46,6 @@ The service runs directly over HTTP. `APP_URL` is blank by default, so localhost
 Supported: **Debian 12+ / Ubuntu 22.04+**, x86_64 or ARM64, systemd, root/sudo access and enough disk for members' storage. Run the manager from outside the target project directory; the installer installs Git and clones the project itself.
 
 ```sh
-sudo -i
 curl -fsSL https://raw.githubusercontent.com/JishnuTheGamer/jtg-cloud/jtg-studio/install.sh -o /root/jtg-cloud-manager.sh && bash /root/jtg-cloud-manager.sh
 ```
 
